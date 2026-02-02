@@ -27,22 +27,25 @@ cargo build --release
 Run the setup wizard:
 
 ```bash
-imp init
+imp bootstrap
 ```
 
 This interactive wizard will:
 
-1. **Name your agent** - Give it a personality (e.g., "Ada", "Rust", "Helper")
-2. **API key** - Paste your Anthropic API key (keeps it secure in `~/.imp/config.toml`)
-3. **Model selection** - Choose between Claude models
-4. **Workspace** - Tell it where your code repositories live
+1. **API key** - Paste your Anthropic API key (keeps it secure in `~/.imp/config.toml`)
+2. **Name your agent** - Give it a personality (e.g., "Ada", "Rust", "Helper")
+3. **About you** - Basic info about yourself (name, role, preferences)
+4. **Save configuration** - Create core files for your agent
+5. **Engineering context** - Optionally set up tech stack and principles files
 
 After setup, you'll have:
 - `~/.imp/config.toml` - Your personal config (never committed to git)
-- `context/IDENTITY.md` - Your agent's personality
-- `context/STACK.md` - Template for your tech stack info
-- `context/PRINCIPLES.md` - Template for coding standards
-- `context/ARCHITECTURE.md` - Template for system architecture
+- `~/.imp/IDENTITY.md` - Your agent's personality  
+- `~/.imp/USER.md` - Information about you for the agent
+- `~/.imp/MEMORY.md` - Your agent's evolving memory
+- `~/.imp/STACK.md` - Template for your tech stack info (optional)
+- `~/.imp/PRINCIPLES.md` - Template for coding standards (optional)
+- `~/.imp/ARCHITECTURE.md` - Template for system architecture (optional)
 
 ## Quick Start
 
@@ -56,12 +59,12 @@ imp chat
 
 ## Customize Your Agent
 
-Edit the files in `context/` to teach your agent about your project:
+Edit the files in `~/.imp/` to teach your agent about your work:
 
-### `context/IDENTITY.md`
-Your agent's personality and role. Already created by `imp init`.
+### `~/.imp/IDENTITY.md`
+Your agent's personality and role. Already created by `imp bootstrap`.
 
-### `context/STACK.md`
+### `~/.imp/STACK.md`
 ```markdown
 # Technology Stack
 
@@ -81,7 +84,7 @@ Your agent's personality and role. Already created by `imp init`.
 - GitHub Actions - CI/CD
 ```
 
-### `context/PRINCIPLES.md`
+### `~/.imp/PRINCIPLES.md`
 ```markdown
 # Coding Principles
 
@@ -101,7 +104,7 @@ Your agent's personality and role. Already created by `imp init`.
 - All tests must pass
 ```
 
-### `context/ARCHITECTURE.md`
+### `~/.imp/ARCHITECTURE.md`
 ```markdown
 # Architecture Overview
 
@@ -163,7 +166,7 @@ imp chat
 ## Troubleshooting
 
 **"Config file not found"**
-- Run `imp init` first
+- Run `imp bootstrap` first
 
 **"API error"**
 - Check your API key in `~/.imp/config.toml`
@@ -174,7 +177,7 @@ imp chat
 - Other tools use standard Unix utilities
 
 **Agent seems confused about project**
-- Update your context files in `context/`
+- Update your context files in `~/.imp/`
 - Run `reload` in chat mode to pick up changes
 
 You're ready to start! Your agent will learn about your project as you work together.

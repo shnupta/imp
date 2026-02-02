@@ -5,7 +5,7 @@ use dialoguer::{Confirm, Input, Password};
 use std::fs;
 
 pub async fn run() -> Result<()> {
-    println!("{}", style("🚀 Welcome to Imp Setup!").bold().blue());
+    println!("{}", style("🚀 Welcome to Imp Bootstrap!").bold().blue());
     println!("Let's get your AI agent configured.\n");
 
     let home = imp_home()?;
@@ -78,8 +78,36 @@ pub async fn run() -> Result<()> {
         )
         .interact()?;
 
-    // ── 3. Save config + core files ──────────────────────────────────
-    println!("\n{}", style("3. Saving Configuration").bold());
+    // ── 3. User Information ──────────────────────────────────────────
+    println!("\n{}", style("3. About You").bold());
+    println!("Help your agent understand who you are and how you work.\n");
+
+    let user_name: String = Input::new()
+        .with_prompt("What's your name?")
+        .interact()?;
+
+    let preferred_name: String = Input::new()
+        .with_prompt("What should your agent call you?")
+        .default(user_name.clone())
+        .interact()?;
+
+    let user_role: String = Input::new()
+        .with_prompt("What's your role? (e.g., Software Engineer, DevOps, Product Manager)")
+        .default("Software Engineer".to_string())
+        .interact()?;
+
+    let communication_style: String = Input::new()
+        .with_prompt("Communication preference")
+        .default("Direct and concise".to_string())
+        .interact()?;
+
+    let work_schedule: String = Input::new()
+        .with_prompt("Typical work hours (e.g., 9-5 EST, flexible)")
+        .default("9-5 local time".to_string())
+        .interact()?;
+
+    // ── 4. Save config + core files ──────────────────────────────────
+    println!("\n{}", style("4. Saving Configuration").bold());
     fs::create_dir_all(&home)?;
     fs::create_dir_all(home.join("projects"))?;
     fs::create_dir_all(home.join("memory"))?;
@@ -108,10 +136,21 @@ pub async fn run() -> Result<()> {
     )?;
     println!("  ✅ MEMORY.md");
 
-    // ── 4. Optional engineering context ──────────────────────────────
+    // USER.md
+    let user_content = include_str!("../../../../templates/global/USER.md")
+        .replace("{{user_name}}", &user_name)
+        .replace("{{preferred_name}}", &preferred_name)
+        .replace("{{user_role}}", &user_role)
+        .replace("{{communication_style}}", &communication_style)
+        .replace("{{work_schedule}}", &work_schedule)
+        .replace("{{timezone}}", "Local timezone"); // TODO: could detect this automatically
+    fs::write(home.join("USER.md"), user_content)?;
+    println!("  ✅ USER.md");
+
+    // ── 5. Optional engineering context ──────────────────────────────
     println!(
         "\n{}",
-        style("4. Engineering Context (optional)").bold()
+        style("5. Engineering Context (optional)").bold()
     );
     println!("Engineering context files help your agent understand your tech stack,");
     println!("coding principles, and architecture across all projects.\n");

@@ -42,7 +42,7 @@ After installation, `imp` will be available from anywhere in your terminal.
 Run the bootstrap wizard to configure your agent:
 
 ```bash
-imp init
+imp bootstrap
 ```
 
 This will:
@@ -67,7 +67,7 @@ imp chat
 
 Imp uses markdown files in the `context/` directory to understand your project:
 
-- **`context/IDENTITY.md`** — Your agent's name and personality (created by `imp init`)
+- **`context/IDENTITY.md`** — Your agent's name and personality (created by `imp bootstrap`)
 - **`context/STACK.md`** — Technology stack and tools your team uses
 - **`context/PRINCIPLES.md`** — Coding standards and team practices
 - **`context/ARCHITECTURE.md`** — System architecture and design decisions

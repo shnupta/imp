@@ -32,7 +32,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Bootstrap wizard — set up your agent for the first time
-    Init,
+    Bootstrap,
     /// Ask your agent a question or give it a task
     Ask {
         /// The question or task
@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init => {
+        Commands::Bootstrap => {
             bootstrap::run().await?;
         }
         Commands::Ask { message } => {

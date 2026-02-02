@@ -1,155 +1,245 @@
+use crate::config::imp_home;
 use crate::error::Result;
-use chrono;
-use std::collections::HashMap;
+use crate::project::ProjectInfo;
+use chrono::Local;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-#[derive(Debug, Clone)]
-pub struct ContextFile {
-    pub name: String,
-    pub path: PathBuf,
-    pub content: String,
+/// Manages three-layer context loading and system prompt assembly.
+///
+/// Layer 1 — Global (~/.imp/): identity, memory, engineering context
+/// Layer 2 — Per-project (~/.imp/projects/<name>/): learned project context
+/// Layer 3 — Repo team context (<cwd>/.imp/): team-maintained, checked into repo
+pub struct ContextManager {
+    global_sections: Vec<ContextSection>,
+    project_sections: Vec<ContextSection>,
+    team_sections: Vec<ContextSection>,
 }
 
-#[derive(Debug, Default)]
-pub struct ContextManager {
-    files: HashMap<String, ContextFile>,
-    context_dir: PathBuf,
+#[derive(Debug, Clone)]
+struct ContextSection {
+    heading: String,
+    content: String,
 }
 
 impl ContextManager {
-    pub fn new<P: AsRef<Path>>(context_dir: P) -> Self {
-        Self {
-            files: HashMap::new(),
-            context_dir: context_dir.as_ref().to_path_buf(),
-        }
+    /// Load all three context layers.
+    pub fn load(project: Option<&ProjectInfo>, cwd: &Path) -> Result<Self> {
+        let home = imp_home()?;
+
+        let global_sections = Self::load_global(&home)?;
+
+        let project_sections = if let Some(proj) = project {
+            Self::load_project(&home, &proj.name)?
+        } else {
+            Vec::new()
+        };
+
+        let team_sections = Self::load_team(cwd)?;
+
+        Ok(Self {
+            global_sections,
+            project_sections,
+            team_sections,
+        })
     }
 
-    pub fn load_all(&mut self) -> Result<()> {
-        self.files.clear();
-        
-        if !self.context_dir.exists() {
-            return Ok(());
-        }
-
-        for entry in fs::read_dir(&self.context_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "md") {
-                if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
-                    let content = fs::read_to_string(&path)?;
-                    let context_file = ContextFile {
-                        name: name.to_string(),
-                        path: path.clone(),
-                        content,
-                    };
-                    self.files.insert(name.to_string(), context_file);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn get(&self, name: &str) -> Option<&ContextFile> {
-        self.files.get(name)
-    }
-
-    pub fn get_content(&self, name: &str) -> Option<&str> {
-        self.files.get(name).map(|f| f.content.as_str())
-    }
-
-    pub fn list_files(&self) -> Vec<&str> {
-        self.files.keys().map(|s| s.as_str()).collect()
-    }
-
-    pub fn assemble_system_prompt(&self) -> String {
+    /// Load Layer 1 — Global context from ~/.imp/
+    fn load_global(home: &Path) -> Result<Vec<ContextSection>> {
         let mut sections = Vec::new();
 
-        // Load order matters — identity and operating instructions frame everything else.
-        let ordered_files = [
-            ("AGENTS",       "Operating Instructions"),
-            ("SOUL",         "Persona"),
-            ("IDENTITY",     "Identity"),
-            ("USER",         "About the User"),
-            ("TOOLS",        "Tools & Environment"),
-            ("MEMORY",       "Long-Term Memory"),
-            ("STACK",        "Technology Stack"),
-            ("PRINCIPLES",   "Coding Principles"),
-            ("ARCHITECTURE", "Architecture Overview"),
-        ];
+        // Always load: IDENTITY.md, MEMORY.md
+        if let Some(content) = read_md(home, "IDENTITY.md") {
+            sections.push(ContextSection {
+                heading: "Identity".into(),
+                content,
+            });
+        }
+        if let Some(content) = read_md(home, "MEMORY.md") {
+            sections.push(ContextSection {
+                heading: "Long-Term Memory".into(),
+                content,
+            });
+        }
 
-        for (name, heading) in ordered_files {
-            if let Some(content) = self.get_content(name) {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() && !trimmed.lines().all(|l| l.starts_with('#') || l.starts_with("<!--") || l.trim().is_empty()) {
-                    sections.push(format!("# {}\n\n{}", heading, trimmed));
-                }
+        // Optional engineering context
+        for (file, heading) in [
+            ("STACK.md", "Technology Stack"),
+            ("PRINCIPLES.md", "Coding Principles"),
+            ("ARCHITECTURE.md", "Architecture Overview"),
+            ("PRIORITIES.md", "Current Priorities"),
+            ("TRACKING.md", "Task Tracking"),
+        ] {
+            if let Some(content) = read_md(home, file) {
+                sections.push(ContextSection {
+                    heading: heading.into(),
+                    content,
+                });
             }
         }
 
-        // Also load any memory daily files
-        let memory_dir = self.context_dir.join("memory");
+        // Daily memory: today + yesterday
+        let memory_dir = home.join("memory");
         if memory_dir.exists() {
-            // Load today's and yesterday's memory
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let yesterday = (chrono::Local::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
-            
+            let today = Local::now().format("%Y-%m-%d").to_string();
+            let yesterday =
+                (Local::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
             for date in [&yesterday, &today] {
-                let path = memory_dir.join(format!("{}.md", date));
-                if path.exists() {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        let trimmed = content.trim();
-                        if !trimmed.is_empty() {
-                            sections.push(format!("# Memory — {}\n\n{}", date, trimmed));
-                        }
-                    }
+                if let Some(content) = read_md(&memory_dir, &format!("{}.md", date)) {
+                    sections.push(ContextSection {
+                        heading: format!("Memory — {}", date),
+                        content,
+                    });
                 }
             }
         }
 
-        if sections.is_empty() {
-            "You are an AI agent for engineering teams. Help with coding, architecture, and engineering tasks.".to_string()
-        } else {
-            sections.join("\n\n---\n\n")
+        Ok(sections)
+    }
+
+    /// Load Layer 2 — Per-project context from ~/.imp/projects/<name>/
+    fn load_project(home: &Path, project_name: &str) -> Result<Vec<ContextSection>> {
+        let project_dir = home.join("projects").join(project_name);
+        let mut sections = Vec::new();
+
+        if !project_dir.exists() {
+            return Ok(sections);
         }
-    }
 
-    pub fn create_context_directory(&self) -> Result<()> {
-        fs::create_dir_all(&self.context_dir)?;
-        Ok(())
-    }
-
-    pub fn write_file(&self, name: &str, content: &str) -> Result<()> {
-        let path = self.context_dir.join(format!("{}.md", name));
-        fs::write(path, content)?;
-        Ok(())
-    }
-
-    pub fn create_template_files(&self) -> Result<()> {
-        self.create_context_directory()?;
-
-        // Create template files if they don't exist
-        let templates = vec![
-            ("SOUL", include_str!("../../../templates/SOUL.md")),
-            ("AGENTS", include_str!("../../../templates/AGENTS.md")),
-            ("USER", include_str!("../../../templates/USER.md")),
-            ("HEARTBEAT", include_str!("../../../templates/HEARTBEAT.md")),
-            ("TOOLS", include_str!("../../../templates/TOOLS.md")),
-            ("MEMORY", include_str!("../../../templates/MEMORY.md")),
-            ("STACK", include_str!("../../../templates/STACK.md")),
-            ("PRINCIPLES", include_str!("../../../templates/PRINCIPLES.md")),
-            ("ARCHITECTURE", include_str!("../../../templates/ARCHITECTURE.md")),
-        ];
-
-        for (name, content) in templates {
-            let path = self.context_dir.join(format!("{}.md", name));
-            if !path.exists() {
-                fs::write(path, content)?;
+        for (file, heading) in [
+            ("CONTEXT.md", "Project Context"),
+            ("PATTERNS.md", "Project Patterns"),
+            ("HISTORY.md", "Project Decision History"),
+        ] {
+            if let Some(content) = read_md(&project_dir, file) {
+                sections.push(ContextSection {
+                    heading: heading.into(),
+                    content,
+                });
             }
         }
 
-        Ok(())
+        // Project-specific daily memory
+        let memory_dir = project_dir.join("memory");
+        if memory_dir.exists() {
+            let today = Local::now().format("%Y-%m-%d").to_string();
+            let yesterday =
+                (Local::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+            for date in [&yesterday, &today] {
+                if let Some(content) = read_md(&memory_dir, &format!("{}.md", date)) {
+                    sections.push(ContextSection {
+                        heading: format!("Project Memory — {}", date),
+                        content,
+                    });
+                }
+            }
+        }
+
+        Ok(sections)
     }
+
+    /// Load Layer 3 — Team/repo context from <cwd>/.imp/
+    fn load_team(cwd: &Path) -> Result<Vec<ContextSection>> {
+        let team_dir = cwd.join(".imp");
+        let mut sections = Vec::new();
+
+        if !team_dir.exists() || !team_dir.is_dir() {
+            return Ok(sections);
+        }
+
+        // Read all .md files from the team directory
+        let mut entries: Vec<_> = fs::read_dir(&team_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path().is_file()
+                    && e.path()
+                        .extension()
+                        .map_or(false, |ext| ext == "md")
+            })
+            .collect();
+
+        entries.sort_by_key(|e| e.path());
+
+        for entry in entries {
+            let path = entry.path();
+            if let Ok(content) = fs::read_to_string(&path) {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() && has_meaningful_content(trimmed) {
+                    let name = path
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Unknown");
+                    sections.push(ContextSection {
+                        heading: format!("Team — {}", name),
+                        content: trimmed.to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(sections)
+    }
+
+    /// Assemble the full system prompt from all three layers.
+    pub fn assemble_system_prompt(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+
+        // Global sections (identity, memory, engineering context)
+        for section in &self.global_sections {
+            parts.push(format!("# {}\n\n{}", section.heading, section.content));
+        }
+
+        // Team sections (complement global with repo-specific context)
+        for section in &self.team_sections {
+            parts.push(format!("# {}\n\n{}", section.heading, section.content));
+        }
+
+        // Project sections (what the agent has learned about this project)
+        for section in &self.project_sections {
+            parts.push(format!("# {}\n\n{}", section.heading, section.content));
+        }
+
+        if parts.is_empty() {
+            "You are a personal AI agent with memory and learning capabilities. You adapt to your user over time.".to_string()
+        } else {
+            parts.join("\n\n---\n\n")
+        }
+    }
+
+    /// List all loaded context sections for display.
+    pub fn loaded_summary(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for s in &self.global_sections {
+            names.push(format!("global: {}", s.heading));
+        }
+        for s in &self.team_sections {
+            names.push(s.heading.clone());
+        }
+        for s in &self.project_sections {
+            names.push(s.heading.clone());
+        }
+        names
+    }
+}
+
+/// Read a markdown file from a directory, returning None if missing or boilerplate-only.
+fn read_md(dir: &Path, filename: &str) -> Option<String> {
+    let path = dir.join(filename);
+    if !path.exists() {
+        return None;
+    }
+    let content = fs::read_to_string(&path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() || !has_meaningful_content(trimmed) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Check if content has meaningful text beyond just headings and HTML comments.
+fn has_meaningful_content(content: &str) -> bool {
+    content.lines().any(|line| {
+        let l = line.trim();
+        !l.is_empty() && !l.starts_with('#') && !l.starts_with("<!--")
+    })
 }

@@ -2,6 +2,7 @@ use crate::client::{ClaudeClient, Message};
 use crate::config::Config;
 use crate::context::ContextManager;
 use crate::error::{ImpError, Result};
+use crate::project::{self, ProjectInfo, ProjectRegistry};
 use crate::tools::ToolRegistry;
 use console::style;
 
@@ -10,24 +11,36 @@ pub struct Agent {
     context: ContextManager,
     tools: ToolRegistry,
     messages: Vec<Message>,
+    project: Option<ProjectInfo>,
 }
 
 impl Agent {
     pub async fn new() -> Result<Self> {
         let config = Config::load()?;
-        
+
         let client = ClaudeClient::new(
             config.llm.api_key.clone(),
             Some(config.llm.model.clone()),
         );
 
-        // Set up context directory in current working directory
-        let context_dir = std::env::current_dir()?.join("context");
-        let mut context = ContextManager::new(context_dir);
-        context.load_all()?;
+        let cwd = std::env::current_dir()?;
+
+        // Detect and auto-register project
+        let project_info = project::detect_project(&cwd);
+        if let Some(ref info) = project_info {
+            let mut registry = ProjectRegistry::load()?;
+            if registry.get_project(&info.name).is_none() {
+                registry.register_project(info)?;
+            }
+        }
+
+        // Load three-layer context
+        let context = ContextManager::load(project_info.as_ref(), &cwd)?;
 
         let mut tools = ToolRegistry::new();
-        let tools_dir = std::env::current_dir()?.join("tools");
+        // Load tools from ~/.imp/tools/ if it exists, or just builtins
+        let home = crate::config::imp_home()?;
+        let tools_dir = home.join("tools");
         tools.load_from_directory(tools_dir)?;
 
         Ok(Self {
@@ -35,11 +48,15 @@ impl Agent {
             context,
             tools,
             messages: Vec::new(),
+            project: project_info,
         })
     }
 
+    pub fn project_name(&self) -> Option<&str> {
+        self.project.as_ref().map(|p| p.name.as_str())
+    }
+
     pub async fn process_message(&mut self, user_message: &str, stream: bool) -> Result<String> {
-        // Add user message to conversation
         self.messages.push(Message {
             role: "user".to_string(),
             content: user_message.to_string(),
@@ -51,37 +68,27 @@ impl Agent {
         while iteration_count < max_iterations {
             iteration_count += 1;
 
-            // Get system prompt from context
             let system_prompt = self.context.assemble_system_prompt();
-            
-            // Get tool schemas
             let tools = Some(self.tools.get_tool_schemas());
 
-            // Send message to Claude
-            let response = self.client.send_message(
-                self.messages.clone(),
-                Some(system_prompt),
-                tools,
-                stream,
-            ).await?;
+            let response = self
+                .client
+                .send_message(self.messages.clone(), Some(system_prompt), tools, stream)
+                .await?;
 
-            // Extract text content
             let text_content = self.client.extract_text_content(&response);
-            
-            // Check for tool calls
             let tool_calls = self.client.extract_tool_calls(&response);
 
-            // Add assistant's response to messages
             if !text_content.is_empty() || !tool_calls.is_empty() {
-                // For now, we'll combine text and tool calls in the content
-                // In a more sophisticated implementation, we'd handle this better
                 let mut content = text_content.clone();
-                
                 if !tool_calls.is_empty() {
                     if !content.is_empty() {
                         content.push_str("\n\n");
                     }
-                    content.push_str(&format!("I need to use {} tool(s) to help with this.", tool_calls.len()));
+                    content.push_str(&format!(
+                        "I need to use {} tool(s) to help with this.",
+                        tool_calls.len()
+                    ));
                 }
 
                 self.messages.push(Message {
@@ -90,21 +97,25 @@ impl Agent {
                 });
             }
 
-            // If no tool calls, we're done
             if tool_calls.is_empty() {
                 return Ok(text_content);
             }
 
-            // Execute tool calls
             let mut tool_results = Vec::new();
             for tool_call in tool_calls {
-                println!("{}", style(format!("🔧 Using tool: {}", tool_call.name)).dim());
-                
-                let result = self.tools.execute_tool(&crate::tools::ToolCall {
-                    id: tool_call.id.clone(),
-                    name: tool_call.name.clone(),
-                    arguments: tool_call.input.clone(),
-                }).await?;
+                println!(
+                    "{}",
+                    style(format!("🔧 Using tool: {}", tool_call.name)).dim()
+                );
+
+                let result = self
+                    .tools
+                    .execute_tool(&crate::tools::ToolCall {
+                        id: tool_call.id.clone(),
+                        name: tool_call.name.clone(),
+                        arguments: tool_call.input.clone(),
+                    })
+                    .await?;
 
                 tool_results.push(result);
 
@@ -115,7 +126,6 @@ impl Agent {
                 }
             }
 
-            // Add tool results to conversation
             for tool_result in tool_results {
                 let result_content = if let Some(ref error) = tool_result.error {
                     format!("Error: {}", error)
@@ -128,28 +138,30 @@ impl Agent {
                     content: format!("Tool result: {}", result_content),
                 });
             }
-
-            // Continue the loop to let Claude respond to tool results
         }
 
-        Err(ImpError::Agent("Maximum iteration limit reached".to_string()))
+        Err(ImpError::Agent(
+            "Maximum iteration limit reached".to_string(),
+        ))
     }
 
     pub fn clear_conversation(&mut self) {
         self.messages.clear();
     }
 
-    pub fn get_context_files(&self) -> Vec<&str> {
-        self.context.list_files()
+    pub fn get_context_summary(&self) -> Vec<String> {
+        self.context.loaded_summary()
     }
 
     pub fn reload_context(&mut self) -> Result<()> {
-        self.context.load_all()?;
+        let cwd = std::env::current_dir()?;
+        self.context = ContextManager::load(self.project.as_ref(), &cwd)?;
         Ok(())
     }
 
     pub fn reload_tools(&mut self) -> Result<()> {
-        let tools_dir = std::env::current_dir()?.join("tools");
+        let home = crate::config::imp_home()?;
+        let tools_dir = home.join("tools");
         self.tools.load_from_directory(tools_dir)?;
         Ok(())
     }

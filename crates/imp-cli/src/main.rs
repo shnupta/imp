@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 mod agent;
 mod cli;
@@ -10,11 +11,11 @@ mod error;
 mod project;
 mod tools;
 
-use cli::{bootstrap, chat, oneshot};
+use cli::{bootstrap, chat, oneshot, project_cmd};
 
 #[derive(Parser)]
 #[command(name = "imp")]
-#[command(about = "Your personal AI agent — learns, remembers, adapts")]
+#[command(about = "A personal AI agent that learns across your projects")]
 #[command(version = "0.1.0")]
 struct Cli {
     #[command(subcommand)]
@@ -38,11 +39,6 @@ enum Commands {
         #[command(subcommand)]
         command: ProjectCommands,
     },
-    /// Manage team shared context (per-repo)
-    Team {
-        #[command(subcommand)]
-        command: TeamCommands,
-    },
 }
 
 #[derive(Subcommand)]
@@ -51,17 +47,11 @@ enum ProjectCommands {
     List,
     /// Register a project (defaults to current directory)
     Add {
-        /// Path to the project (defaults to cwd)
-        path: Option<String>,
+        /// Path to the project directory
+        path: Option<PathBuf>,
     },
-    /// Show loaded context summary for current project
+    /// Show context summary for the current project
     Context,
-}
-
-#[derive(Subcommand)]
-enum TeamCommands {
-    /// Create .imp/ in the current repo with team engineering templates
-    Init,
 }
 
 #[tokio::main]
@@ -69,19 +59,26 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init => bootstrap::run().await?,
+        Commands::Init => {
+            bootstrap::run().await?;
+        }
         Commands::Ask { message } => {
             let full_message = message.join(" ");
             oneshot::run(&full_message).await?;
         }
-        Commands::Chat => chat::run().await?,
+        Commands::Chat => {
+            chat::run().await?;
+        }
         Commands::Project { command } => match command {
-            ProjectCommands::List => cli::project::list().await?,
-            ProjectCommands::Add { path } => cli::project::add(path).await?,
-            ProjectCommands::Context => cli::project::context().await?,
-        },
-        Commands::Team { command } => match command {
-            TeamCommands::Init => cli::team::init().await?,
+            ProjectCommands::List => {
+                project_cmd::list()?;
+            }
+            ProjectCommands::Add { path } => {
+                project_cmd::add(path)?;
+            }
+            ProjectCommands::Context => {
+                project_cmd::context()?;
+            }
         },
     }
 

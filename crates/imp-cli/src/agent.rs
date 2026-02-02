@@ -15,6 +15,8 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Create an agent. Automatically detects the project from cwd and loads
+    /// two-layer context (global + per-project).
     pub async fn new() -> Result<Self> {
         let config = Config::load()?;
 
@@ -23,24 +25,19 @@ impl Agent {
             Some(config.llm.model.clone()),
         );
 
-        let cwd = std::env::current_dir()?;
-
         // Detect and auto-register project
+        let cwd = std::env::current_dir()?;
         let project_info = project::detect_project(&cwd);
         if let Some(ref info) = project_info {
             let mut registry = ProjectRegistry::load()?;
-            if registry.get_project(&info.name).is_none() {
-                registry.register_project(info)?;
-            }
+            registry.register_project(info)?;
         }
 
-        // Load three-layer context
-        let context = ContextManager::load(project_info.as_ref(), &cwd)?;
+        // Load two-layer context
+        let context = ContextManager::load(project_info.as_ref())?;
 
         let mut tools = ToolRegistry::new();
-        // Load tools from ~/.imp/tools/ if it exists, or just builtins
-        let home = crate::config::imp_home()?;
-        let tools_dir = home.join("tools");
+        let tools_dir = crate::config::imp_home()?.join("tools");
         tools.load_from_directory(tools_dir)?;
 
         Ok(Self {
@@ -54,6 +51,10 @@ impl Agent {
 
     pub fn project_name(&self) -> Option<&str> {
         self.project.as_ref().map(|p| p.name.as_str())
+    }
+
+    pub fn loaded_sections(&self) -> Vec<&str> {
+        self.context.loaded_sections()
     }
 
     pub async fn process_message(&mut self, user_message: &str, stream: bool) -> Result<String> {
@@ -147,22 +148,5 @@ impl Agent {
 
     pub fn clear_conversation(&mut self) {
         self.messages.clear();
-    }
-
-    pub fn get_context_summary(&self) -> Vec<String> {
-        self.context.loaded_summary()
-    }
-
-    pub fn reload_context(&mut self) -> Result<()> {
-        let cwd = std::env::current_dir()?;
-        self.context = ContextManager::load(self.project.as_ref(), &cwd)?;
-        Ok(())
-    }
-
-    pub fn reload_tools(&mut self) -> Result<()> {
-        let home = crate::config::imp_home()?;
-        let tools_dir = home.join("tools");
-        self.tools.load_from_directory(tools_dir)?;
-        Ok(())
     }
 }

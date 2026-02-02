@@ -5,21 +5,21 @@ use dialoguer::Input;
 use std::io::{self, Write};
 
 pub async fn run() -> Result<()> {
-    println!("{}", style("🤖 Imp — Interactive Chat").bold().blue());
+    println!("{}", style("🤖 Imp - Interactive Chat").bold().blue());
     println!("Type 'quit', 'exit', or Ctrl+C to end the session.");
     println!("{}", style("─".repeat(50)).dim());
 
     let mut agent = Agent::new().await?;
 
-    // Show project and context info
     if let Some(name) = agent.project_name() {
-        println!("{}", style(format!("📁 Project: {}", name)).dim());
+        println!("{}", style(format!("📂 Project: {}", name)).dim());
     }
-    let context_summary = agent.get_context_summary();
-    if !context_summary.is_empty() {
+
+    let sections = agent.loaded_sections();
+    if !sections.is_empty() {
         println!(
             "{}",
-            style(format!("📚 Context: {}", context_summary.join(", "))).dim()
+            style(format!("📚 Context: {}", sections.join(", "))).dim()
         );
     }
     println!();
@@ -53,12 +53,6 @@ pub async fn run() -> Result<()> {
                 println!("🧹 Conversation cleared.");
                 continue;
             }
-            "reload" => {
-                agent.reload_context()?;
-                agent.reload_tools()?;
-                println!("🔄 Context and tools reloaded.");
-                continue;
-            }
             "help" => {
                 show_help();
                 continue;
@@ -87,15 +81,11 @@ pub async fn run() -> Result<()> {
 
 fn show_help() {
     println!("{}", style("Available commands:").bold());
-    println!("  {} — Exit the chat", style("quit/exit/q").cyan());
+    println!("  {} - Exit the chat", style("quit/exit/q").cyan());
     println!(
-        "  {} — Clear conversation history",
+        "  {} - Clear conversation history",
         style("clear").cyan()
     );
-    println!(
-        "  {} — Reload context files and tools",
-        style("reload").cyan()
-    );
-    println!("  {} — Show this help message", style("help").cyan());
-    println!("  {} — Ask anything else!", style("<your message>").cyan());
+    println!("  {} - Show this help message", style("help").cyan());
+    println!("  {} - Ask anything else!", style("<your message>").cyan());
 }

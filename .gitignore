@@ -1,0 +1,24 @@
+# Rust
+target/
+*.swp
+*.swo
+
+# Config (contains API keys)
+config.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Node (web UI)
+web/node_modules/
+web/dist/
+
+# Local data
+*.db
+*.db-journal

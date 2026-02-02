@@ -17,23 +17,32 @@ Imp is an AI agent that acts as both a **coding partner** and **work organizer**
 
 - Rust (install from [rustup.rs](https://rustup.rs/))
 - An [Anthropic API key](https://console.anthropic.com/)
+- Optional: `ripgrep` for better code search (install via your package manager or [GitHub](https://github.com/BurntSushi/ripgrep))
 
-### Build from source
+**System Requirements:**
+- Unix-like OS (Linux, macOS) or Windows with WSL
+- Git (for project detection)
+- Standard shell utilities (ls, grep, etc.)
+
+### Build and Install from source
 
 ```bash
 git clone <your-repo-url>
 cd imp
 cargo build --release
+
+# Install to your PATH for system-wide access
+cargo install --path .
 ```
 
-The binary will be at `target/release/imp`.
+After installation, `imp` will be available from anywhere in your terminal.
 
 ## First-time Setup
 
 Run the bootstrap wizard to configure your agent:
 
 ```bash
-./target/release/imp init
+imp init
 ```
 
 This will:

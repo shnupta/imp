@@ -33,17 +33,35 @@ pub async fn run() -> Result<()> {
         "You need an Anthropic API key. Get one at: https://console.anthropic.com/\n"
     );
 
-    let api_key: String = Password::new()
-        .with_prompt("Enter your Anthropic API key")
-        .interact()?;
-
-    if !api_key.starts_with("sk-ant-") {
-        println!(
-            "{}",
-            style("⚠️  Warning: key doesn't look like an Anthropic key (should start with 'sk-ant-')")
-                .yellow()
-        );
-    }
+    let api_key: String = loop {
+        let key = Password::new()
+            .with_prompt("Enter your Anthropic API key")
+            .interact()?;
+        
+        if key.trim().is_empty() {
+            println!("{}", style("❌ API key cannot be empty").red());
+            continue;
+        }
+        
+        if !key.starts_with("sk-ant-") {
+            println!(
+                "{}",
+                style("⚠️  Warning: key doesn't look like an Anthropic key (should start with 'sk-ant-')")
+                    .yellow()
+            );
+            
+            let continue_anyway = Confirm::new()
+                .with_prompt("Continue with this key anyway?")
+                .default(false)
+                .interact()?;
+            
+            if !continue_anyway {
+                continue;
+            }
+        }
+        
+        break key;
+    };
 
     // ── 2. Agent Identity ────────────────────────────────────────────
     println!("\n{}", style("2. Agent Identity").bold());
@@ -70,7 +88,7 @@ pub async fn run() -> Result<()> {
         llm: LlmConfig {
             provider: "anthropic".to_string(),
             api_key,
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-3-5-sonnet-20241022".to_string(),
         },
     };
     config.save()?;

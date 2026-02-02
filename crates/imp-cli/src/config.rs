@@ -17,7 +17,7 @@ pub struct LlmConfig {
 }
 
 fn default_model() -> String {
-    "claude-sonnet-4-20250514".to_string()
+    "claude-3-5-sonnet-20241022".to_string()
 }
 
 /// Returns the Imp home directory (~/.imp/ by default, respects IMP_HOME env var).
@@ -42,8 +42,25 @@ impl Config {
             )));
         }
 
-        let content = fs::read_to_string(config_path)?;
-        let config: Config = toml::from_str(&content)?;
+        let content = fs::read_to_string(&config_path)
+            .map_err(|e| ImpError::Config(format!("Failed to read config file: {}", e)))?;
+        
+        let config: Config = toml::from_str(&content)
+            .map_err(|e| ImpError::Config(format!("Failed to parse config file: {}", e)))?;
+        
+        // Validate the config
+        if config.llm.api_key.trim().is_empty() {
+            return Err(ImpError::Config(
+                "API key is empty. Run 'imp init' to set it up.".to_string()
+            ));
+        }
+
+        if !config.llm.api_key.starts_with("sk-ant-") {
+            return Err(ImpError::Config(
+                "API key doesn't look like a valid Anthropic key (should start with 'sk-ant-')".to_string()
+            ));
+        }
+
         Ok(config)
     }
 

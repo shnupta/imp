@@ -1,3 +1,8 @@
+//! # Imp - AI Agent CLI
+//!
+//! A personal AI agent that learns across your projects, providing intelligent
+//! assistance for coding, documentation, and task automation.
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -16,7 +21,9 @@ use cli::{bootstrap, chat, oneshot, project_cmd};
 #[derive(Parser)]
 #[command(name = "imp")]
 #[command(about = "A personal AI agent that learns across your projects")]
-#[command(version = "0.1.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(author = "Your Name <your.email@example.com>")]
+#[command(long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

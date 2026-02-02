@@ -1,3 +1,9 @@
+//! Tool system for Imp agents.
+//!
+//! This module provides a flexible tool registry that supports both built-in tools
+//! (implemented in Rust) and custom tools (defined in TOML files). Tools can execute
+//! shell commands, read/write files, and perform other system operations.
+
 use crate::error::{ImpError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

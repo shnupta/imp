@@ -1,3 +1,12 @@
+//! Context management system for Imp agents.
+//!
+//! Implements a two-layer context system:
+//! - Layer 1: Global context from ~/.imp/ (identity, memory, engineering context)  
+//! - Layer 2: Per-project context from ~/.imp/projects/<name>/ (project-specific context)
+//!
+//! Context files are loaded and assembled into system prompts that give the agent
+//! understanding of the user's identity, project structure, and domain knowledge.
+
 use crate::config::imp_home;
 use crate::error::Result;
 use crate::project::ProjectInfo;

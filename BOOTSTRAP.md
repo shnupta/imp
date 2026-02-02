@@ -18,6 +18,8 @@ cd imp
 cargo build --release
 
 # The binary will be at target/release/imp
+# Install it to your PATH for easy access:
+# cargo install --path .
 ```
 
 ## First-Time Setup
@@ -25,7 +27,7 @@ cargo build --release
 Run the setup wizard:
 
 ```bash
-./target/release/imp init
+imp init
 ```
 
 This interactive wizard will:
@@ -46,10 +48,10 @@ After setup, you'll have:
 
 ```bash
 # Ask a quick question
-./target/release/imp ask "What programming languages are used in this project?"
+imp ask "What programming languages are used in this project?"
 
 # Start an interactive chat
-./target/release/imp chat
+imp chat
 ```
 
 ## Customize Your Agent

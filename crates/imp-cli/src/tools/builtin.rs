@@ -41,10 +41,8 @@ async fn file_read(arguments: &Value) -> Result<String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| ImpError::Tool("Missing 'path' parameter".to_string()))?;
 
-    match fs::read_to_string(path) {
-        Ok(content) => Ok(content),
-        Err(e) => Ok(format!("Error reading file '{}': {}", path, e)),
-    }
+    fs::read_to_string(path)
+        .map_err(|e| ImpError::Tool(format!("Failed to read file '{}': {}", path, e)))
 }
 
 async fn file_write(arguments: &Value) -> Result<String> {
@@ -56,10 +54,16 @@ async fn file_write(arguments: &Value) -> Result<String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| ImpError::Tool("Missing 'content' parameter".to_string()))?;
 
-    match fs::write(path, content) {
-        Ok(()) => Ok(format!("Successfully wrote {} bytes to '{}'", content.len(), path)),
-        Err(e) => Ok(format!("Error writing file '{}': {}", path, e)),
+    // Create parent directories if they don't exist
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ImpError::Tool(format!("Failed to create parent directories for '{}': {}", path, e)))?;
     }
+
+    fs::write(path, content)
+        .map_err(|e| ImpError::Tool(format!("Failed to write file '{}': {}", path, e)))?;
+    
+    Ok(format!("Successfully wrote {} bytes to '{}'", content.len(), path))
 }
 
 async fn file_edit(arguments: &Value) -> Result<String> {
@@ -75,20 +79,19 @@ async fn file_edit(arguments: &Value) -> Result<String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| ImpError::Tool("Missing 'new_text' parameter".to_string()))?;
 
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            if content.contains(old_text) {
-                let updated_content = content.replace(old_text, new_text);
-                match fs::write(path, &updated_content) {
-                    Ok(()) => Ok(format!("Successfully replaced text in '{}'", path)),
-                    Err(e) => Ok(format!("Error writing file '{}': {}", path, e)),
-                }
-            } else {
-                Ok(format!("Text not found in file '{}'", path))
-            }
-        }
-        Err(e) => Ok(format!("Error reading file '{}': {}", path, e)),
+    let content = fs::read_to_string(path)
+        .map_err(|e| ImpError::Tool(format!("Failed to read file '{}': {}", path, e)))?;
+
+    let occurrences = content.matches(old_text).count();
+    if occurrences == 0 {
+        return Err(ImpError::Tool(format!("Text not found in file '{}'", path)));
     }
+
+    let updated_content = content.replace(old_text, new_text);
+    fs::write(path, &updated_content)
+        .map_err(|e| ImpError::Tool(format!("Failed to write updated file '{}': {}", path, e)))?;
+
+    Ok(format!("Successfully replaced {} occurrence(s) in '{}'", occurrences, path))
 }
 
 async fn search_code(arguments: &Value) -> Result<String> {
@@ -100,31 +103,49 @@ async fn search_code(arguments: &Value) -> Result<String> {
         .and_then(|v| v.as_str())
         .unwrap_or(".");
 
-    // Try ripgrep first, fall back to grep
-    let output = Command::new("rg")
-        .args(&["-n", "--color", "never", query, path])
-        .output();
-
-    let result = if let Ok(output) = output {
+    // Try ripgrep first (better performance and features)
+    if let Ok(output) = Command::new("rg")
+        .args(&[
+            "-n",           // Show line numbers
+            "--color", "never",  // No color output
+            "--type-add", "code:*.{rs,py,js,ts,go,java,cpp,c,h,hpp}", // Define code file types
+            "--type", "code",    // Search only code files
+            "--context", "2",    // Show 2 lines of context
+            "--max-count", "50", // Limit to 50 matches per file
+            query,
+            path
+        ])
+        .output() 
+    {
         if output.status.success() {
-            String::from_utf8_lossy(&output.stdout).to_string()
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.trim().is_empty() {
+                Ok(format!("No matches found for '{}' in code files under '{}'", query, path))
+            } else {
+                Ok(format!("Search results for '{}' in '{}':\n\n{}", query, path, stdout))
+            }
         } else {
-            format!("No matches found for '{}' in '{}'", query, path)
+            Ok(format!("No matches found for '{}' in code files under '{}'", query, path))
         }
     } else {
-        // Fall back to grep
+        // Fallback to basic grep
         let output = Command::new("grep")
-            .args(&["-rn", query, path])
-            .output()?;
+            .args(&["-rn", "--include=*.rs", "--include=*.py", "--include=*.js", 
+                   "--include=*.ts", "--include=*.go", "--include=*.java", query, path])
+            .output()
+            .map_err(|e| ImpError::Tool(format!("Search command failed: {}", e)))?;
             
         if output.status.success() {
-            String::from_utf8_lossy(&output.stdout).to_string()
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.trim().is_empty() {
+                Ok(format!("No matches found for '{}' in code files under '{}'", query, path))
+            } else {
+                Ok(format!("Search results for '{}' in '{}':\n\n{}", query, path, stdout))
+            }
         } else {
-            format!("No matches found for '{}' in '{}'", query, path)
+            Ok(format!("No matches found for '{}' in code files under '{}'", query, path))
         }
-    };
-
-    Ok(result)
+    }
 }
 
 async fn list_files(arguments: &Value) -> Result<String> {

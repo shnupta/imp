@@ -86,7 +86,7 @@ impl ClaudeClient {
         Self {
             client,
             api_key,
-            model: model.unwrap_or_else(|| "claude-3-sonnet-20240229".to_string()),
+            model: model.unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string()),
             base_url: "https://api.anthropic.com".to_string(),
         }
     }
@@ -175,27 +175,32 @@ impl ClaudeClient {
                         break;
                     }
 
-                    if let Ok(event) = serde_json::from_str::<StreamEvent>(data) {
-                        match event.event_type.as_str() {
-                            "content_block_start" => {
-                                if let Some(content_block) = event.content_block {
-                                    match content_block {
-                                        ContentBlock::ToolUse { .. } => {
+                    match serde_json::from_str::<StreamEvent>(data) {
+                        Ok(event) => {
+                            match event.event_type.as_str() {
+                                "content_block_start" => {
+                                    if let Some(content_block) = event.content_block {
+                                        if let ContentBlock::ToolUse { .. } = content_block {
                                             tool_calls.push(content_block);
                                         }
-                                        _ => {}
                                     }
                                 }
-                            }
-                            "content_block_delta" => {
-                                if let Some(delta) = event.delta {
-                                    if let Some(text) = delta.text {
-                                        full_text.push_str(&text);
-                                        print!("{}", text); // Stream to stdout
+                                "content_block_delta" => {
+                                    if let Some(delta) = event.delta {
+                                        if let Some(text) = delta.text {
+                                            full_text.push_str(&text);
+                                            print!("{}", text); // Stream to stdout
+                                        }
                                     }
                                 }
+                                _ => {
+                                    // Ignore other event types
+                                }
                             }
-                            _ => {}
+                        }
+                        Err(_) => {
+                            // Skip malformed JSON events
+                            continue;
                         }
                     }
                 }

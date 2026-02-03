@@ -189,10 +189,23 @@ impl Agent {
                 self.emit(style("💭 Thinking...").dim());
             }
 
-            let response = self
+            let response = match self
                 .client
-                .send_message(self.messages.clone(), Some(system_prompt), tools, stream)
-                .await?;
+                .send_message(self.messages.clone(), Some(system_prompt.clone()), tools.clone(), stream)
+                .await
+            {
+                Ok(r) => r,
+                Err(ref e) if Self::is_context_overflow_error(e) => {
+                    // Context too long — force compact and retry
+                    self.emit(style("⚠ Context too long — compacting and retrying...").yellow());
+                    self.messages = compaction::force_compact(&self.messages);
+                    let retry_tools = Some(self.tools.get_tool_schemas().await);
+                    self.client
+                        .send_message(self.messages.clone(), Some(system_prompt), retry_tools, stream)
+                        .await?
+                }
+                Err(e) => return Err(e),
+            };
 
             if show_thinking {
                 // No "done" message needed — the response output is the indication
@@ -337,13 +350,28 @@ impl Agent {
         self.messages.len()
     }
 
-    /// Manually trigger compaction. Returns true if compaction was performed.
+    /// Manually trigger compaction. Always compacts when called explicitly.
+    /// Returns true if compaction was performed.
     pub fn compact_now(&mut self) -> bool {
-        let system_prompt = self.context.assemble_system_prompt();
-        let system_tokens = system_prompt.len() / 4;
         let before = self.messages.len();
-        self.messages = compaction::compact_if_needed(&self.messages, system_tokens);
+        if before <= 4 {
+            return false; // Nothing meaningful to compact
+        }
+        self.messages = compaction::force_compact(&self.messages);
         self.messages.len() < before
+    }
+
+    /// Check if an error indicates the context/input is too long for the model.
+    fn is_context_overflow_error(error: &ImpError) -> bool {
+        let msg = error.to_string().to_lowercase();
+        msg.contains("too long")
+            || msg.contains("too large")
+            || msg.contains("too many tokens")
+            || msg.contains("context_length")
+            || msg.contains("max_tokens")
+            || msg.contains("prompt is too")
+            || msg.contains("exceeds the maximum")
+            || msg.contains("request too large")
     }
 
     /// Get a human-readable status string for sub-agents (for /agents command).

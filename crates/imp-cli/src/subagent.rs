@@ -236,27 +236,33 @@ impl SubAgent {
             // about this since they have a fixed token budget
             messages = crate::compaction::compact_if_needed(&messages, system_tokens_estimate);
 
-            // Also truncate large tool results that the model has already seen.
-            // After compaction keeps recent messages, old tool results in those
-            // messages are still huge. Shrink any tool_result content > 2000 chars
-            // that isn't in the last 4 messages.
-            if messages.len() > 4 {
-                let truncate_up_to = messages.len() - 4;
-                for msg in &mut messages[..truncate_up_to] {
-                    truncate_tool_results(&mut msg.content);
-                }
-            }
-
             let tool_schemas = Some(tools.get_tool_schemas().await);
 
-            let response = client
+            let response = match client
                 .send_message(
                     messages.clone(),
                     Some(system_prompt.clone()),
-                    tool_schemas,
+                    tool_schemas.clone(),
                     false, // no streaming
                 )
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(ref e) if is_context_overflow_error(e) => {
+                    // Context too long — force compact and retry
+                    messages = crate::compaction::force_compact(&messages);
+                    let retry_tools = Some(tools.get_tool_schemas().await);
+                    client
+                        .send_message(
+                            messages.clone(),
+                            Some(system_prompt.clone()),
+                            retry_tools,
+                            false,
+                        )
+                        .await?
+                }
+                Err(e) => return Err(e),
+            };
 
             // Record token usage
             if let Some(ref resp_usage) = response.usage {
@@ -368,34 +374,15 @@ fn extract_summary(text: &str) -> String {
     }
 }
 
-/// Truncate large tool_result content blocks in a message to save context space.
-/// This modifies the message content in-place: any tool_result with content > 2000 chars
-/// gets replaced with a truncated version + note.
-fn truncate_tool_results(content: &mut serde_json::Value) {
-    const MAX_TOOL_RESULT_CHARS: usize = 2000;
-
-    if let serde_json::Value::Array(blocks) = content {
-        for block in blocks.iter_mut() {
-            let is_tool_result = block
-                .get("type")
-                .and_then(|t| t.as_str())
-                .map_or(false, |t| t == "tool_result");
-
-            if !is_tool_result {
-                continue;
-            }
-
-            // Tool result content can be a string or nested
-            if let Some(text) = block.get("content").and_then(|c| c.as_str()) {
-                if text.len() > MAX_TOOL_RESULT_CHARS {
-                    let preview: String = text.chars().take(MAX_TOOL_RESULT_CHARS).collect();
-                    block["content"] = serde_json::Value::String(format!(
-                        "{}… [truncated — {} chars total, use file_read with offset/limit to re-read specific sections]",
-                        preview,
-                        text.len()
-                    ));
-                }
-            }
-        }
-    }
+/// Check if an error indicates the context/input is too long for the model.
+fn is_context_overflow_error(error: &crate::error::ImpError) -> bool {
+    let msg = error.to_string().to_lowercase();
+    msg.contains("too long")
+        || msg.contains("too large")
+        || msg.contains("too many tokens")
+        || msg.contains("context_length")
+        || msg.contains("max_tokens")
+        || msg.contains("prompt is too")
+        || msg.contains("exceeds the maximum")
+        || msg.contains("request too large")
 }

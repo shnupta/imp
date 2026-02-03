@@ -98,11 +98,28 @@ pub fn compact_if_needed(messages: &[Message], system_prompt_tokens: usize) -> V
         return messages.to_vec();
     }
 
-    if messages.len() <= KEEP_RECENT_MESSAGES {
-        return messages.to_vec(); // Not enough to compact
+    do_compact(messages, KEEP_RECENT_MESSAGES)
+}
+
+/// Force compaction regardless of threshold. Used when the API rejects input as too long,
+/// or when the user explicitly requests compaction.
+/// Uses a more aggressive keep count to ensure we get well under the limit.
+pub fn force_compact(messages: &[Message]) -> Vec<Message> {
+    // Keep fewer messages when force-compacting — we know we're over the limit
+    let aggressive_keep = (KEEP_RECENT_MESSAGES / 2).max(4);
+    do_compact(messages, aggressive_keep)
+}
+
+/// Perform the actual compaction, keeping `keep_recent` messages verbatim.
+fn do_compact(messages: &[Message], keep_recent: usize) -> Vec<Message> {
+    if messages.len() <= keep_recent {
+        // Not enough messages to compact — truncate large tool results instead
+        let mut truncated = messages.to_vec();
+        truncate_old_tool_results(&mut truncated, 2);
+        return truncated;
     }
 
-    let split_point = messages.len() - KEEP_RECENT_MESSAGES;
+    let split_point = messages.len() - keep_recent;
     let old_messages = &messages[..split_point];
     let recent_messages = &messages[split_point..];
 
@@ -113,8 +130,46 @@ pub fn compact_if_needed(messages: &[Message], system_prompt_tokens: usize) -> V
     compacted.push(Message::text("assistant", "Understood, I have the conversation context. Continuing from where we left off."));
     compacted.extend(recent_messages.iter().cloned());
 
-    // Print a notice
-    eprintln!("📦 Compacted {} old messages into summary (keeping {} recent)", old_messages.len(), recent_messages.len());
+    // Also truncate large tool results in the kept messages
+    truncate_old_tool_results(&mut compacted, 4);
+
+    eprintln!("📦 Compacted {} old messages into summary (keeping {} recent)", old_messages.len(), keep_recent);
 
     compacted
+}
+
+/// Truncate large tool_result content in messages, except the last `preserve_last` messages.
+fn truncate_old_tool_results(messages: &mut [Message], preserve_last: usize) {
+    const MAX_TOOL_RESULT_CHARS: usize = 1500;
+
+    if messages.len() <= preserve_last {
+        return;
+    }
+
+    let truncate_up_to = messages.len() - preserve_last;
+    for msg in &mut messages[..truncate_up_to] {
+        if let Value::Array(blocks) = &mut msg.content {
+            for block in blocks.iter_mut() {
+                let is_tool_result = block
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .map_or(false, |t| t == "tool_result");
+
+                if !is_tool_result {
+                    continue;
+                }
+
+                if let Some(text) = block.get("content").and_then(|c| c.as_str()) {
+                    if text.len() > MAX_TOOL_RESULT_CHARS {
+                        let preview: String = text.chars().take(MAX_TOOL_RESULT_CHARS).collect();
+                        block["content"] = Value::String(format!(
+                            "{}… [truncated — {} chars total]",
+                            preview,
+                            text.len()
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }

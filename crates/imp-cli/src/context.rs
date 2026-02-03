@@ -37,6 +37,7 @@ impl ContextManager {
         // ── Layer 1: Global (~/.imp/) ────────────────────────────────
         // Always loaded
         load_md(&home, "IDENTITY.md", "Identity", &mut sections);
+        load_md(&home, "USER.md", "About Your Human", &mut sections);
         load_md(&home, "MEMORY.md", "Long-Term Memory", &mut sections);
 
         // Optional engineering context

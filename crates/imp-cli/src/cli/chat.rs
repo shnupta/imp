@@ -63,7 +63,7 @@ pub async fn run() -> Result<()> {
         println!("\n{}", style(format!("{}:", agent.display_name())).bold().blue());
         println!("{}", style("─".repeat(20)).dim());
 
-        match agent.process_message(input, true).await {
+        match agent.process_message_with_markdown(input).await {
             Ok(_) => {
                 println!("\n{}", style("─".repeat(50)).dim());
                 println!();

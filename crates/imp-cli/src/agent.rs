@@ -179,6 +179,8 @@ impl Agent {
             }
 
             let system_prompt = self.context.assemble_system_prompt();
+            let system_tokens = system_prompt.len() / 4;
+            self.messages = compaction::compact_if_needed(&self.messages, system_tokens);
             let tools = Some(self.tools.get_tool_schemas().await);
 
             // Show thinking indicator for non-streaming mode
@@ -348,7 +350,8 @@ impl Agent {
         self.messages.len()
     }
 
-    /// Manually trigger compaction. Returns true if compaction was performed.
+    /// Manually trigger compaction (/compact). Always compacts.
+    /// Returns true if compaction was performed.
     pub fn compact_now(&mut self) -> bool {
         let before = self.messages.len();
         if before <= 4 {

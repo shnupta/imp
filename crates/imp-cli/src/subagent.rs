@@ -219,6 +219,8 @@ impl SubAgent {
         let mut files_changed: Vec<String> = Vec::new();
         let mut final_text = String::new();
 
+        let system_tokens_estimate = system_prompt.len() / 4;
+
         loop {
             // Check token budget before each API call
             if usage.total_tokens() >= self.max_tokens_budget {
@@ -230,6 +232,7 @@ impl SubAgent {
                 break;
             }
 
+            messages = crate::compaction::compact_if_needed(&messages, system_tokens_estimate);
             let tool_schemas = Some(tools.get_tool_schemas().await);
 
             let response = match client

@@ -78,6 +78,7 @@ pub async fn run() -> Result<()> {
             api_key: None,
         },
         auth: Default::default(),
+        thinking: Default::default(),
     });
     
     // Auto-detect token type and configure

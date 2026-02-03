@@ -116,7 +116,7 @@ impl Agent {
             for tool_call in tool_calls {
                 println!(
                     "{}",
-                    style(format!("🔧 Using tool: {}", tool_call.name)).dim()
+                    style(format_tool_call(&tool_call.name, &tool_call.input)).dim()
                 );
 
                 let result = self
@@ -161,5 +161,58 @@ impl Agent {
 
     pub fn clear_conversation(&mut self) {
         self.messages.clear();
+    }
+}
+
+/// Format a tool call with its arguments for display.
+/// Keeps output compact: inline for simple calls, summarized for complex ones.
+fn format_tool_call(name: &str, input: &serde_json::Value) -> String {
+    let args = match input.as_object() {
+        Some(map) if !map.is_empty() => map,
+        _ => return format!("🔧 {name}"),
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    for (key, val) in args {
+        let formatted = match val {
+            serde_json::Value::String(s) => {
+                let len = s.len();
+                if len > 100 {
+                    format!("({len} chars)")
+                } else {
+                    format!("\"{}\"", s)
+                }
+            }
+            serde_json::Value::Array(arr) => format!("[{} items]", arr.len()),
+            serde_json::Value::Object(obj) => format!("{{{} keys}}", obj.len()),
+            other => {
+                let s = other.to_string();
+                if s.len() > 100 {
+                    format!("{}...", &s[..97])
+                } else {
+                    s
+                }
+            }
+        };
+        parts.push(format!("{key}={formatted}"));
+    }
+
+    let inline = format!("🔧 {name}: {}", parts.join(" "));
+    if inline.len() <= 120 {
+        inline
+    } else {
+        // Truncate to fit: show as many args as fit on one line
+        let prefix = format!("🔧 {name}: ");
+        let mut out = prefix.clone();
+        for (i, part) in parts.iter().enumerate() {
+            let sep = if i > 0 { " " } else { "" };
+            if out.len() + sep.len() + part.len() > 117 {
+                out.push_str("...");
+                break;
+            }
+            out.push_str(sep);
+            out.push_str(part);
+        }
+        out
     }
 }

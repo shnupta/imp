@@ -8,6 +8,8 @@ pub struct Config {
     pub llm: LlmConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub thinking: ThinkingConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -50,6 +52,31 @@ pub struct OAuthConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ApiKeyConfig {
     pub key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ThinkingConfig {
+    #[serde(default = "default_thinking_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_budget_tokens")]
+    pub budget_tokens: u32,
+}
+
+impl Default for ThinkingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_thinking_enabled(),
+            budget_tokens: default_budget_tokens(),
+        }
+    }
+}
+
+fn default_thinking_enabled() -> bool {
+    true
+}
+
+fn default_budget_tokens() -> u32 {
+    10000
 }
 
 fn default_model() -> String {

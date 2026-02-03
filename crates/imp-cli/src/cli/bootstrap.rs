@@ -105,6 +105,7 @@ pub async fn run() -> Result<()> {
             api_key: None, // Legacy field - not used in new format
         },
         auth: AuthConfig::default(),
+        thinking: Default::default(),
     };
     
     // Auto-detect token type and configure auth

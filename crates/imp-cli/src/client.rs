@@ -108,6 +108,8 @@ enum ContentBlock {
         name: String,
         input: Value,
     },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +132,7 @@ struct Delta {
     #[serde(rename = "type")]
     delta_type: String,
     text: Option<String>,
+    thinking: Option<String>,
     partial_json: Option<String>,
     stop_reason: Option<String>,
 }
@@ -176,6 +179,12 @@ impl ClaudeClient {
                     "x-api-key",
                     HeaderValue::from_str(api_key)?,
                 );
+                if self.config.thinking.enabled {
+                    headers.insert(
+                        "anthropic-beta",
+                        HeaderValue::from_static("extended-thinking-2025-04-30"),
+                    );
+                }
             }
             AuthMethod::OAuth => {
                 let oauth_config = self.config.oauth_config()
@@ -185,9 +194,14 @@ impl ClaudeClient {
                     HeaderValue::from_str(&format!("Bearer {}", oauth_config.access_token))?,
                 );
                 // Add required OAuth headers
+                let beta_value = if self.config.thinking.enabled {
+                    "claude-code-20250219,oauth-2025-04-20,extended-thinking-2025-04-30"
+                } else {
+                    "claude-code-20250219,oauth-2025-04-20"
+                };
                 headers.insert(
                     "anthropic-beta",
-                    HeaderValue::from_static("claude-code-20250219,oauth-2025-04-20"),
+                    HeaderValue::from_static(beta_value),
                 );
                 headers.insert(
                     "user-agent",
@@ -219,11 +233,29 @@ impl ClaudeClient {
 
         let headers = self.prepare_auth_headers()?;
 
+        // When thinking is enabled, max_tokens must exceed budget_tokens
+        let max_tokens = if self.config.thinking.enabled {
+            let min_required = self.config.thinking.budget_tokens + 4096;
+            std::cmp::max(self.config.llm.max_tokens, min_required)
+        } else {
+            self.config.llm.max_tokens
+        };
+
         let mut request_body = json!({
             "model": self.model,
-            "max_tokens": self.config.llm.max_tokens,
+            "max_tokens": max_tokens,
             "messages": messages,
         });
+
+        // Add thinking configuration
+        if self.config.thinking.enabled {
+            request_body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": self.config.thinking.budget_tokens
+            });
+            // Temperature must not be set when thinking is enabled
+            request_body.as_object_mut().unwrap().remove("temperature");
+        }
 
         if let Some(system) = system_prompt {
             // OAuth tokens require Claude Code identity prefix
@@ -299,6 +331,9 @@ impl ClaudeClient {
         let mut tool_calls_in_progress: std::collections::HashMap<usize, (String, String, String)> = std::collections::HashMap::new(); // index -> (id, name, accumulated_input)
         let mut finalized_tool_calls: Vec<ContentBlock> = Vec::new();
         let mut stop_reason: Option<String> = None;
+        let mut thinking_in_progress: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+        let mut finalized_thinking: Vec<ContentBlock> = Vec::new();
+        let mut thinking_announced = false;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result?;
@@ -316,11 +351,23 @@ impl ClaudeClient {
                             match event.event_type.as_str() {
                                 "content_block_start" => {
                                     if let Some(content_block) = event.content_block {
-                                        if let ContentBlock::ToolUse { id, name, .. } = content_block {
-                                            // Start tracking this tool call
-                                            if let Some(index) = event.index {
-                                                tool_calls_in_progress.insert(index, (id, name, String::new()));
+                                        match content_block {
+                                            ContentBlock::ToolUse { id, name, .. } => {
+                                                // Start tracking this tool call
+                                                if let Some(index) = event.index {
+                                                    tool_calls_in_progress.insert(index, (id, name, String::new()));
+                                                }
                                             }
+                                            ContentBlock::Thinking { .. } => {
+                                                if let Some(index) = event.index {
+                                                    thinking_in_progress.insert(index, String::new());
+                                                    if !thinking_announced {
+                                                        eprint!("{}", console::style("💭 Thinking...").dim());
+                                                        thinking_announced = true;
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -331,6 +378,15 @@ impl ClaudeClient {
                                                 if let Some(text) = delta.text {
                                                     full_text.push_str(&text);
                                                     print!("{}", text); // Stream to stdout
+                                                }
+                                            }
+                                            "thinking_delta" => {
+                                                if let Some(thinking_text) = delta.thinking {
+                                                    if let Some(index) = event.index {
+                                                        if let Some(accumulated) = thinking_in_progress.get_mut(&index) {
+                                                            accumulated.push_str(&thinking_text);
+                                                        }
+                                                    }
                                                 }
                                             }
                                             "input_json_delta" => {
@@ -347,6 +403,15 @@ impl ClaudeClient {
                                     }
                                 }
                                 "content_block_stop" => {
+                                    // Finalize thinking block if it was in progress
+                                    if let Some(index) = event.index {
+                                        if let Some(accumulated) = thinking_in_progress.remove(&index) {
+                                            if thinking_announced {
+                                                eprintln!(" {}", console::style("done").dim());
+                                            }
+                                            finalized_thinking.push(ContentBlock::Thinking { thinking: accumulated });
+                                        }
+                                    }
                                     // Finalize tool call if it was in progress
                                     if let Some(index) = event.index {
                                         if let Some((id, name, accumulated_input)) = tool_calls_in_progress.remove(&index) {
@@ -390,8 +455,9 @@ impl ClaudeClient {
 
         println!(); // New line after streaming
 
-        // Construct response
+        // Construct response — thinking blocks come first (mirrors API order)
         let mut content_blocks = Vec::new();
+        content_blocks.extend(finalized_thinking);
         if !full_text.is_empty() {
             content_blocks.push(ContentBlock::Text { text: full_text });
         }
@@ -447,6 +513,10 @@ impl ClaudeClient {
                     "id": id,
                     "name": name,
                     "input": input
+                }),
+                ContentBlock::Thinking { thinking } => json!({
+                    "type": "thinking",
+                    "thinking": thinking
                 }),
             })
             .collect()

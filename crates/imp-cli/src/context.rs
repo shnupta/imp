@@ -104,6 +104,33 @@ impl ContextManager {
     pub fn loaded_sections(&self) -> Vec<&str> {
         self.sections.iter().map(|s| s.heading.as_str()).collect()
     }
+
+    /// Extract the agent's name from the Identity section.
+    /// Looks for "**Your Name**: <name>" or falls back to the heading "# Your Identity: <name>".
+    pub fn agent_name(&self) -> Option<String> {
+        let identity = self.sections.iter().find(|s| s.heading == "Identity")?;
+        // Try "**Your Name**: <name>"
+        for line in identity.content.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("**Your Name**:") {
+                let name = rest.trim();
+                if !name.is_empty() && !name.contains("{{") {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        // Fallback: "# Your Identity: <name>"
+        for line in identity.content.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("# Your Identity:") {
+                let name = rest.trim();
+                if !name.is_empty() && !name.contains("{{") {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
+    }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────

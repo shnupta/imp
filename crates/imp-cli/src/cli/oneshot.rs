@@ -3,10 +3,10 @@ use crate::error::Result;
 use console::style;
 
 pub async fn run(message: &str) -> Result<()> {
-    println!("{}", style("🤖 Imp").bold().blue());
-    println!("{}", style("─".repeat(50)).dim());
-
     let mut agent = Agent::new().await?;
+
+    println!("{}", style(format!("🤖 {}", agent.display_name())).bold().blue());
+    println!("{}", style("─".repeat(50)).dim());
 
     if let Some(name) = agent.project_name() {
         println!("{}", style(format!("📂 Project: {}", name)).dim());

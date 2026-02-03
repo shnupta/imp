@@ -54,6 +54,11 @@ impl Agent {
         self.context.loaded_sections()
     }
 
+    /// The agent's display name, parsed from IDENTITY.md. Falls back to "Imp".
+    pub fn display_name(&self) -> String {
+        self.context.agent_name().unwrap_or_else(|| "Imp".to_string())
+    }
+
     pub async fn process_message(&mut self, user_message: &str, stream: bool) -> Result<String> {
         self.messages.push(Message {
             role: "user".to_string(),

@@ -5,11 +5,11 @@ use dialoguer::Input;
 use std::io::{self, Write};
 
 pub async fn run() -> Result<()> {
-    println!("{}", style("🤖 Imp - Interactive Chat").bold().blue());
+    let mut agent = Agent::new().await?;
+
+    println!("{}", style(format!("🤖 {} - Interactive Chat", agent.display_name())).bold().blue());
     println!("Type 'quit', 'exit', or Ctrl+C to end the session.");
     println!("{}", style("─".repeat(50)).dim());
-
-    let mut agent = Agent::new().await?;
 
     if let Some(name) = agent.project_name() {
         println!("{}", style(format!("📂 Project: {}", name)).dim());
@@ -60,7 +60,7 @@ pub async fn run() -> Result<()> {
             _ => {}
         }
 
-        println!("\n{}", style("Imp:").bold().blue());
+        println!("\n{}", style(format!("{}:", agent.display_name())).bold().blue());
         println!("{}", style("─".repeat(20)).dim());
 
         match agent.process_message(input, true).await {

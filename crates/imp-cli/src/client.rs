@@ -109,7 +109,7 @@ enum ContentBlock {
         input: Value,
     },
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking { thinking: String, signature: Option<String> },
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +133,7 @@ struct Delta {
     delta_type: String,
     text: Option<String>,
     thinking: Option<String>,
+    signature: Option<String>,
     partial_json: Option<String>,
     stop_reason: Option<String>,
 }
@@ -320,7 +321,7 @@ impl ClaudeClient {
         let mut tool_calls_in_progress: std::collections::HashMap<usize, (String, String, String)> = std::collections::HashMap::new(); // index -> (id, name, accumulated_input)
         let mut finalized_tool_calls: Vec<ContentBlock> = Vec::new();
         let mut stop_reason: Option<String> = None;
-        let mut thinking_in_progress: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+        let mut thinking_in_progress: std::collections::HashMap<usize, (String, Option<String>)> = std::collections::HashMap::new(); // (thinking_text, signature)
         let mut finalized_thinking: Vec<ContentBlock> = Vec::new();
         let mut thinking_announced = false;
         let mut usage_input_tokens: u32 = 0;
@@ -384,7 +385,7 @@ impl ClaudeClient {
                                             }
                                             ContentBlock::Thinking { .. } => {
                                                 if let Some(index) = event.index {
-                                                    thinking_in_progress.insert(index, String::new());
+                                                    thinking_in_progress.insert(index, (String::new(), None));
                                                     if !thinking_announced {
                                                         eprint!("{}", console::style("💭 Thinking...").dim());
                                                         thinking_announced = true;
@@ -407,7 +408,7 @@ impl ClaudeClient {
                                             "thinking_delta" => {
                                                 if let Some(thinking_text) = delta.thinking {
                                                     if let Some(index) = event.index {
-                                                        if let Some(accumulated) = thinking_in_progress.get_mut(&index) {
+                                                        if let Some((ref mut accumulated, _)) = thinking_in_progress.get_mut(&index) {
                                                             accumulated.push_str(&thinking_text);
                                                         }
                                                     }
@@ -422,6 +423,15 @@ impl ClaudeClient {
                                                     }
                                                 }
                                             }
+                                            "signature_delta" => {
+                                                if let Some(sig) = delta.signature {
+                                                    if let Some(index) = event.index {
+                                                        if let Some((_, ref mut signature)) = thinking_in_progress.get_mut(&index) {
+                                                            *signature = Some(sig);
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -429,11 +439,11 @@ impl ClaudeClient {
                                 "content_block_stop" => {
                                     // Finalize thinking block if it was in progress
                                     if let Some(index) = event.index {
-                                        if let Some(accumulated) = thinking_in_progress.remove(&index) {
+                                        if let Some((accumulated, signature)) = thinking_in_progress.remove(&index) {
                                             if thinking_announced {
                                                 eprintln!(" {}", console::style("done").dim());
                                             }
-                                            finalized_thinking.push(ContentBlock::Thinking { thinking: accumulated });
+                                            finalized_thinking.push(ContentBlock::Thinking { thinking: accumulated, signature });
                                         }
                                     }
                                     // Finalize tool call if it was in progress
@@ -547,10 +557,16 @@ impl ClaudeClient {
                     "name": name,
                     "input": input
                 }),
-                ContentBlock::Thinking { thinking } => json!({
-                    "type": "thinking",
-                    "thinking": thinking
-                }),
+                ContentBlock::Thinking { thinking, signature } => {
+                    let mut block = json!({
+                        "type": "thinking",
+                        "thinking": thinking
+                    });
+                    if let Some(sig) = signature {
+                        block["signature"] = json!(sig);
+                    }
+                    block
+                },
             })
             .collect()
     }

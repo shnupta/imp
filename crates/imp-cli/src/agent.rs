@@ -13,6 +13,8 @@ use console::style;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use termimad::*;
 
 /// When false, `maybe_distill_insights` is a no-op. Users have `imp reflect`
@@ -33,6 +35,8 @@ pub struct Agent {
     session_id: String,
     /// Handles for spawned sub-agents running as background tokio tasks.
     sub_agents: Vec<SubAgentHandle>,
+    /// Shared flag for Ctrl+C interrupt support.
+    interrupt_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Agent {
@@ -85,6 +89,7 @@ impl Agent {
             db,
             session_id,
             sub_agents: Vec::new(),
+            interrupt_flag: None,
         })
     }
 
@@ -144,10 +149,15 @@ impl Agent {
         }
 
         let mut iteration_count = 0;
-        let max_iterations = 50;
+        let max_iterations = 100;
         let mut turn_tool_count: usize = 0;
 
         while iteration_count < max_iterations {
+            // Check for interrupt before each iteration
+            if self.is_interrupted() {
+                return Err(ImpError::Agent("interrupted".to_string()));
+            }
+
             iteration_count += 1;
 
             let system_prompt = self.context.assemble_system_prompt();
@@ -216,6 +226,11 @@ impl Agent {
 
             let mut tool_results = Vec::new();
             for tool_call in tool_calls {
+                // Check for interrupt between tool calls
+                if self.is_interrupted() {
+                    return Err(ImpError::Agent("interrupted".to_string()));
+                }
+
                 println!(
                     "{}",
                     style(format_tool_call(&tool_call.name, &tool_call.input)).dim()
@@ -529,22 +544,22 @@ impl Agent {
         !self.sub_agents.is_empty()
     }
 
-    /// Wait until at least one sub-agent completes. Returns the completed results.
-    /// If no sub-agents are active, returns an empty vec immediately.
-    pub async fn wait_for_subagent(&mut self) -> Vec<SubAgentResult> {
-        if self.sub_agents.is_empty() {
-            return Vec::new();
-        }
+    /// Get IDs of active sub-agents (for notification display).
+    pub fn active_subagent_ids(&self) -> Vec<u64> {
+        self.sub_agents.iter().map(|h| h.id).collect()
+    }
 
-        // Poll every 500ms until something finishes
-        loop {
-            // Check if any have finished
-            let any_finished = self.sub_agents.iter().any(|h| h.handle.is_finished());
-            if any_finished {
-                return self.collect_completed_subagents().await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
+    /// Set the interrupt flag (shared with Ctrl+C signal handler).
+    pub fn set_interrupt_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.interrupt_flag = Some(flag);
+    }
+
+    /// Check if an interrupt has been requested.
+    fn is_interrupted(&self) -> bool {
+        self.interrupt_flag
+            .as_ref()
+            .map(|f| f.load(Ordering::SeqCst))
+            .unwrap_or(false)
     }
 
     /// Abort all running sub-agents. Called when the chat session ends.

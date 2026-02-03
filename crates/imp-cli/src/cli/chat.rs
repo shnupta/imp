@@ -4,6 +4,9 @@ use console::style;
 use dialoguer::Select;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::mpsc;
 
 pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> Result<()> {
     let mut agent = Agent::new().await?;
@@ -44,7 +47,7 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
             .bold()
             .blue()
     );
-    println!("Type /help for commands, /quit or Ctrl+D to exit.");
+    println!("Type /help for commands, Ctrl+C to interrupt, Ctrl+D to exit.");
     println!("{}", style("─".repeat(50)).dim());
 
     // Print session ID (first 8 chars)
@@ -64,58 +67,108 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
     }
     println!();
 
+    // Ctrl+C interrupt flag — shared between signal handler and agent loop
+    let interrupted = Arc::new(AtomicBool::new(false));
+    agent.set_interrupt_flag(interrupted.clone());
+
     // Set up rustyline editor for input with history
     let mut rl = DefaultEditor::new().expect("Failed to initialize line editor");
+
+    // Channel for sub-agent completion notifications (background watcher → main loop)
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<String>();
 
     loop {
         // Before prompting, check for completed sub-agents and auto-summarize
         let completed = agent.collect_completed_subagents().await;
         if !completed.is_empty() {
-            let results_text = completed
-                .iter()
-                .map(|r| r.format_report())
-                .collect::<Vec<_>>()
-                .join("\n---\n");
+            auto_summarize_subagents(&mut agent, completed).await;
+        }
 
-            eprintln!(
-                "\n{}",
-                style(format!("📬 {} sub-agent(s) completed — generating summary...", completed.len())).yellow()
-            );
+        // Also drain any notifications from the background watcher
+        while let Ok(msg) = notify_rx.try_recv() {
+            eprintln!("{}", style(msg).yellow());
+        }
 
-            // Auto-trigger agent response with sub-agent results
-            let synthetic_msg = format!(
-                "[Sub-agent results — {} task(s) completed]\n\n{}\n\n\
-                Summarize what the sub-agent accomplished. Be concise.",
-                completed.len(),
-                results_text
-            );
-
-            println!(
-                "\n{}",
-                style(format!("{}:", agent.display_name())).bold().blue()
-            );
-            println!("{}", style("─".repeat(20)).dim());
-
-            match agent.process_message(&synthetic_msg, true).await {
-                Ok(_) => {
-                    println!("\n{}", style("─".repeat(50)).dim());
-                    println!();
+        // Start a background sub-agent watcher if any are active
+        let watcher_handle = if agent.has_active_subagents() {
+            let tx = notify_tx.clone();
+            let check_ids: Vec<u64> = agent.active_subagent_ids();
+            Some(tokio::spawn(async move {
+                // Poll every 2 seconds, send a notification when something finishes
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    // We can't check the actual handles from here, so just send a ping
+                    // The main loop will collect results after readline returns
+                    let _ = tx.send(format!("📬 Sub-agent(s) may have completed — press Enter to check (agents: {:?})", check_ids));
+                    break; // Only notify once per readline cycle
                 }
-                Err(e) => {
-                    eprintln!("{}", style(format!("⚠ Failed to summarize: {}", e)).dim());
+            }))
+        } else {
+            None
+        };
+
+        // Multiline input: lines ending with \ continue on the next line
+        let mut full_input = String::new();
+        let mut first_line = true;
+        loop {
+            let prompt = if first_line {
+                format!("{} ", style("You:").bold().green())
+            } else {
+                format!("{}  ", style("...").dim())
+            };
+
+            // Clear interrupt flag before readline
+            interrupted.store(false, Ordering::SeqCst);
+
+            let readline = rl.readline(&prompt);
+            match readline {
+                Ok(line) => {
+                    if line.ends_with('\\') {
+                        // Continuation: strip trailing backslash, add newline
+                        full_input.push_str(&line[..line.len() - 1]);
+                        full_input.push('\n');
+                        first_line = false;
+                    } else {
+                        full_input.push_str(&line);
+                        break;
+                    }
+                }
+                Err(ReadlineError::Interrupted) => {
+                    if full_input.is_empty() && first_line {
+                        // Ctrl+C on empty prompt — just show a hint
+                        println!("{}", style("(Ctrl+C — type /quit to exit)").dim());
+                        full_input.clear();
+                        break;
+                    } else {
+                        // Ctrl+C during multiline — cancel the input
+                        println!("{}", style("(input cancelled)").dim());
+                        full_input.clear();
+                        break;
+                    }
+                }
+                Err(ReadlineError::Eof) => {
+                    // Ctrl+D — exit
+                    full_input = "\x04".to_string();
+                    break;
+                }
+                Err(_) => {
+                    full_input = "\x04".to_string();
+                    break;
                 }
             }
         }
 
-        // Simple blocking readline — safe, no stdin contention
-        let readline = rl.readline(&format!("{} ", style("You:").bold().green()));
-        let input = match readline {
-            Ok(line) => line,
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
-            Err(_) => break,
-        };
+        // Kill the background watcher if it's still running
+        if let Some(handle) = watcher_handle {
+            handle.abort();
+        }
 
-        let input = input.trim();
+        // Handle Ctrl+D
+        if full_input == "\x04" {
+            break;
+        }
+
+        let input = full_input.trim();
 
         if input.is_empty() {
             continue;
@@ -175,20 +228,79 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
         );
         println!("{}", style("─".repeat(20)).dim());
 
+        // Clear interrupt flag before agent work
+        interrupted.store(false, Ordering::SeqCst);
+
+        // Set up Ctrl+C handler for interrupting agent work
+        let int_flag = interrupted.clone();
+        let ctrlc_handler = tokio::spawn(async move {
+            if let Ok(()) = tokio::signal::ctrl_c().await {
+                int_flag.store(true, Ordering::SeqCst);
+            }
+        });
+
         match agent.process_message_with_markdown(input).await {
             Ok(_) => {
                 println!("{}", style("─".repeat(50)).dim());
                 println!();
             }
             Err(e) => {
-                println!("{}", style(format!("❌ Error: {}", e)).red());
-                println!("{}", style("─".repeat(50)).dim());
-                println!();
+                let msg = e.to_string();
+                if msg.contains("interrupted") {
+                    println!("\n{}", style("⚡ Interrupted").yellow());
+                    println!("{}", style("─".repeat(50)).dim());
+                    println!();
+                } else {
+                    println!("{}", style(format!("❌ Error: {}", e)).red());
+                    println!("{}", style("─".repeat(50)).dim());
+                    println!();
+                }
             }
         }
+
+        // Cancel the Ctrl+C handler so it doesn't interfere with readline
+        ctrlc_handler.abort();
     }
 
     Ok(())
+}
+
+/// Auto-summarize completed sub-agent results.
+async fn auto_summarize_subagents(agent: &mut Agent, completed: Vec<crate::subagent::SubAgentResult>) {
+    let results_text = completed
+        .iter()
+        .map(|r| r.format_report())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+
+    eprintln!(
+        "\n{}",
+        style(format!("📬 {} sub-agent(s) completed — generating summary...", completed.len())).yellow()
+    );
+
+    // Auto-trigger agent response with sub-agent results
+    let synthetic_msg = format!(
+        "[Sub-agent results — {} task(s) completed]\n\n{}\n\n\
+        Summarize what the sub-agent accomplished. Be concise.",
+        completed.len(),
+        results_text
+    );
+
+    println!(
+        "\n{}",
+        style(format!("{}:", agent.display_name())).bold().blue()
+    );
+    println!("{}", style("─".repeat(20)).dim());
+
+    match agent.process_message(&synthetic_msg, true).await {
+        Ok(_) => {
+            println!("\n{}", style("─".repeat(50)).dim());
+            println!();
+        }
+        Err(e) => {
+            eprintln!("{}", style(format!("⚠ Failed to summarize: {}", e)).dim());
+        }
+    }
 }
 
 /// Show an interactive session picker if previous sessions exist for this project.
@@ -298,7 +410,11 @@ fn show_help() {
     println!("  {}       — Show session info", style("/session").cyan());
     println!("  {}        — Show sub-agent status", style("/agents").cyan());
     println!("  {}          — Show this help", style("/help").cyan());
-    println!("  {}  — Ask anything!", style("<your message>").cyan());
+    println!();
+    println!("{}", style("Input:").bold());
+    println!("  {}      — Multiline input (backslash at end of line)", style("line \\").cyan());
+    println!("  {}        — Interrupt current agent action", style("Ctrl+C").cyan());
+    println!("  {}        — Exit chat", style("Ctrl+D").cyan());
 }
 
 fn show_session_info(agent: &Agent) {

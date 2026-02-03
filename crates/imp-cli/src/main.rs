@@ -10,11 +10,14 @@ use std::path::PathBuf;
 mod agent;
 mod cli;
 mod client;
+mod compaction;
 mod config;
 mod context;
+mod db;
 mod error;
 mod project;
 mod tools;
+mod usage;
 
 use cli::{bootstrap, chat, learn, login, oneshot, project_cmd};
 
@@ -42,7 +45,15 @@ enum Commands {
         message: Vec<String>,
     },
     /// Start an interactive chat session
-    Chat,
+    Chat {
+        /// Resume the latest session (for the current project)
+        #[arg(long)]
+        resume: bool,
+
+        /// Resume a specific session by ID (full or prefix)
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Teach your agent something new
     Learn,
     /// Manage projects
@@ -80,8 +91,8 @@ async fn main() -> Result<()> {
             let full_message = message.join(" ");
             oneshot::run(&full_message).await?;
         }
-        Commands::Chat => {
-            chat::run().await?;
+        Commands::Chat { resume, session } => {
+            chat::run(resume, session).await?;
         }
         Commands::Learn => {
             learn::run().await?;

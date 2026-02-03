@@ -1,48 +1,11 @@
 use crate::client::Message;
 use serde_json::Value;
 
-const CHARS_PER_TOKEN: usize = 4;
-const CONTEXT_LIMIT_TOKENS: usize = 200_000;
-const COMPACTION_THRESHOLD: f64 = 0.75; // Trigger at 75% of limit
 const KEEP_RECENT_MESSAGES: usize = 10; // Always keep last 10 messages verbatim
-
-/// Estimate token count for a message
-pub fn estimate_tokens(message: &Message) -> usize {
-    let content_len = match &message.content {
-        Value::String(s) => s.len(),
-        Value::Array(blocks) => {
-            // Sum up text content from all blocks
-            blocks.iter().map(|b| {
-                if let Some(text) = b.get("text").and_then(|t| t.as_str()) {
-                    text.len()
-                } else if let Some(content) = b.get("content").and_then(|c| c.as_str()) {
-                    content.len()
-                } else {
-                    // tool_use blocks etc — estimate from JSON size
-                    b.to_string().len()
-                }
-            }).sum()
-        }
-        other => other.to_string().len(),
-    };
-    content_len / CHARS_PER_TOKEN
-}
-
-/// Estimate total tokens for all messages
-pub fn estimate_total_tokens(messages: &[Message]) -> usize {
-    messages.iter().map(estimate_tokens).sum()
-}
-
-/// Check if compaction is needed
-pub fn needs_compaction(messages: &[Message], system_prompt_tokens: usize) -> bool {
-    let total = estimate_total_tokens(messages) + system_prompt_tokens;
-    total as f64 > (CONTEXT_LIMIT_TOKENS as f64 * COMPACTION_THRESHOLD)
-}
 
 /// Create a compaction summary from messages
 /// Returns a summary message that replaces the old messages
-pub fn create_summary_message(messages_to_summarize: &[Message]) -> String {
-    // Build a condensed summary of the conversation so far
+fn create_summary_message(messages_to_summarize: &[Message]) -> String {
     let mut summary_parts = Vec::new();
 
     for msg in messages_to_summarize {
@@ -91,35 +54,20 @@ pub fn create_summary_message(messages_to_summarize: &[Message]) -> String {
     )
 }
 
-/// Compact messages if needed. Returns the new message list.
-/// Keeps the most recent messages verbatim and summarizes older ones.
-pub fn compact_if_needed(messages: &[Message], system_prompt_tokens: usize) -> Vec<Message> {
-    if !needs_compaction(messages, system_prompt_tokens) {
-        return messages.to_vec();
-    }
-
-    do_compact(messages, KEEP_RECENT_MESSAGES)
-}
-
-/// Force compaction regardless of threshold. Used when the API rejects input as too long,
-/// or when the user explicitly requests compaction.
-/// Uses a more aggressive keep count to ensure we get well under the limit.
-pub fn force_compact(messages: &[Message]) -> Vec<Message> {
-    // Keep fewer messages when force-compacting — we know we're over the limit
-    let aggressive_keep = (KEEP_RECENT_MESSAGES / 2).max(4);
-    do_compact(messages, aggressive_keep)
-}
-
-/// Perform the actual compaction, keeping `keep_recent` messages verbatim.
-fn do_compact(messages: &[Message], keep_recent: usize) -> Vec<Message> {
-    if messages.len() <= keep_recent {
+/// Compact messages: summarize older messages, keep recent ones verbatim.
+/// Called when the API rejects input as too long, or when the user explicitly
+/// requests compaction via /compact.
+///
+/// No threshold guessing — we only compact when we know we need to.
+pub fn compact(messages: &[Message]) -> Vec<Message> {
+    if messages.len() <= KEEP_RECENT_MESSAGES {
         // Not enough messages to compact — truncate large tool results instead
         let mut truncated = messages.to_vec();
         truncate_old_tool_results(&mut truncated, 2);
         return truncated;
     }
 
-    let split_point = messages.len() - keep_recent;
+    let split_point = messages.len() - KEEP_RECENT_MESSAGES;
     let old_messages = &messages[..split_point];
     let recent_messages = &messages[split_point..];
 
@@ -133,7 +81,7 @@ fn do_compact(messages: &[Message], keep_recent: usize) -> Vec<Message> {
     // Also truncate large tool results in the kept messages
     truncate_old_tool_results(&mut compacted, 4);
 
-    eprintln!("📦 Compacted {} old messages into summary (keeping {} recent)", old_messages.len(), keep_recent);
+    eprintln!("📦 Compacted {} old messages into summary (keeping {} recent)", old_messages.len(), KEEP_RECENT_MESSAGES);
 
     compacted
 }

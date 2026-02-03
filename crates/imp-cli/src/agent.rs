@@ -179,8 +179,6 @@ impl Agent {
             }
 
             let system_prompt = self.context.assemble_system_prompt();
-            let system_tokens = system_prompt.len() / 4; // rough estimate
-            self.messages = compaction::compact_if_needed(&self.messages, system_tokens);
             let tools = Some(self.tools.get_tool_schemas().await);
 
             // Show thinking indicator for non-streaming mode
@@ -196,9 +194,9 @@ impl Agent {
             {
                 Ok(r) => r,
                 Err(ref e) if Self::is_context_overflow_error(e) => {
-                    // Context too long — force compact and retry
+                    // Context too long — compact and retry
                     self.emit(style("⚠ Context too long — compacting and retrying...").yellow());
-                    self.messages = compaction::force_compact(&self.messages);
+                    self.messages = compaction::compact(&self.messages);
                     let retry_tools = Some(self.tools.get_tool_schemas().await);
                     self.client
                         .send_message(self.messages.clone(), Some(system_prompt), retry_tools, stream)
@@ -350,14 +348,13 @@ impl Agent {
         self.messages.len()
     }
 
-    /// Manually trigger compaction. Always compacts when called explicitly.
-    /// Returns true if compaction was performed.
+    /// Manually trigger compaction. Returns true if compaction was performed.
     pub fn compact_now(&mut self) -> bool {
         let before = self.messages.len();
         if before <= 4 {
             return false; // Nothing meaningful to compact
         }
-        self.messages = compaction::force_compact(&self.messages);
+        self.messages = compaction::compact(&self.messages);
         self.messages.len() < before
     }
 

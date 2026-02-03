@@ -219,8 +219,6 @@ impl SubAgent {
         let mut files_changed: Vec<String> = Vec::new();
         let mut final_text = String::new();
 
-        let system_tokens_estimate = system_prompt.len() / 4;
-
         loop {
             // Check token budget before each API call
             if usage.total_tokens() >= self.max_tokens_budget {
@@ -231,10 +229,6 @@ impl SubAgent {
                 );
                 break;
             }
-
-            // Compact conversation if it's getting large — sub-agents are aggressive
-            // about this since they have a fixed token budget
-            messages = crate::compaction::compact_if_needed(&messages, system_tokens_estimate);
 
             let tool_schemas = Some(tools.get_tool_schemas().await);
 
@@ -249,8 +243,8 @@ impl SubAgent {
             {
                 Ok(r) => r,
                 Err(ref e) if is_context_overflow_error(e) => {
-                    // Context too long — force compact and retry
-                    messages = crate::compaction::force_compact(&messages);
+                    // Context too long — compact and retry
+                    messages = crate::compaction::compact(&messages);
                     let retry_tools = Some(tools.get_tool_schemas().await);
                     client
                         .send_message(

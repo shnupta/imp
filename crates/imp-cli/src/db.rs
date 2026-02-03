@@ -17,11 +17,11 @@ pub struct Database {
 }
 
 impl Database {
-    /// Open (or create) the database at `~/.imp/history.db` and run migrations.
+    /// Open (or create) the database at `~/.imp/imp.db` and run migrations.
     pub fn open() -> Result<Self> {
         let imp_home = crate::config::imp_home()?;
         std::fs::create_dir_all(&imp_home)?;
-        let db_path = imp_home.join("history.db");
+        let db_path = imp_home.join("imp.db");
 
         let conn =
             Connection::open(&db_path).map_err(|e| ImpError::Database(e.to_string()))?;

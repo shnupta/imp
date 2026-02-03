@@ -4,7 +4,7 @@
 //! - L1 (Always loaded): Identity, user info, project summary, self-learning instructions
 //! - L2 (On-demand): Full project context, memory, patterns, git info — listed in prompt
 //!   so the agent can file_read them when relevant
-//! - L3 (Cold storage): SQLite history.db — searchable via exec tool
+//! - L3 (Cold storage): SQLite imp.db — searchable via exec tool
 
 use crate::config::imp_home;
 use crate::error::Result;

@@ -19,7 +19,7 @@ mod project;
 mod tools;
 mod usage;
 
-use cli::{bootstrap, chat, learn, login, oneshot, project_cmd};
+use cli::{bootstrap, chat, learn, login, oneshot, project_cmd, reflect};
 
 #[derive(Parser)]
 #[command(name = "imp")]
@@ -56,6 +56,12 @@ enum Commands {
     },
     /// Teach your agent something new
     Learn,
+    /// Distill daily interaction logs into long-term memory
+    Reflect {
+        /// Date to reflect on (YYYY-MM-DD, default: today)
+        #[arg(short, long)]
+        date: Option<String>,
+    },
     /// Manage projects
     Project {
         #[command(subcommand)]
@@ -96,6 +102,9 @@ async fn main() -> Result<()> {
         }
         Commands::Learn => {
             learn::run().await?;
+        }
+        Commands::Reflect { date } => {
+            reflect::run(date).await?;
         }
         Commands::Project { command } => match command {
             ProjectCommands::List => {

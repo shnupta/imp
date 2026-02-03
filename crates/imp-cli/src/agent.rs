@@ -16,6 +16,7 @@ use termimad::*;
 
 pub struct Agent {
     client: ClaudeClient,
+    config: Config,
     context: ContextManager,
     tools: ToolRegistry,
     messages: Vec<Message>,
@@ -66,6 +67,7 @@ impl Agent {
 
         Ok(Self {
             client,
+            config,
             context,
             tools,
             messages: Vec::new(),
@@ -121,10 +123,21 @@ impl Agent {
             self.messages = compaction::compact_if_needed(&self.messages, system_tokens);
             let tools = Some(self.tools.get_tool_schemas());
 
+            // Show thinking indicator for non-streaming mode
+            let show_thinking = !stream && self.config.thinking.enabled;
+            if show_thinking {
+                eprint!("{}", style("💭 Thinking...").dim());
+                let _ = std::io::stderr().flush();
+            }
+
             let response = self
                 .client
                 .send_message(self.messages.clone(), Some(system_prompt), tools, stream)
                 .await?;
+
+            if show_thinking {
+                eprintln!(" {}", style("done").dim());
+            }
 
             // Record and display token usage
             if let Some(ref usage) = response.usage {
@@ -153,8 +166,8 @@ impl Agent {
                 if render_markdown && !stream {
                     Self::render_markdown(&text_content);
                 }
-                // Post-task reflection: write memory if tools were used this turn
-                self.maybe_write_reflection(turn_tool_count, &text_content);
+                // Distill structured insights from this turn
+                self.maybe_distill_insights(user_message, &text_content, turn_tool_count);
                 return Ok(text_content);
             }
 
@@ -241,83 +254,80 @@ impl Agent {
         &self.usage
     }
 
-    /// Best-effort reflection: append a timestamped entry to the daily memory file
-    /// after any turn that involved tool calls.
-    fn maybe_write_reflection(&mut self, tool_count: usize, response_text: &str) {
-        if tool_count == 0 {
+    /// Distill structured insights from a conversation turn into the daily memory file.
+    /// Only writes if the turn was substantive (had tool calls or a long response).
+    fn maybe_distill_insights(&mut self, user_message: &str, response_text: &str, tool_count: usize) {
+        if tool_count > 0 {
+            self.total_tool_calls += tool_count;
+        }
+        // Only distill if the turn was substantive
+        if tool_count == 0 && response_text.len() < 200 {
             return;
         }
-        self.total_tool_calls += tool_count;
 
-        if let Err(e) = self.write_reflection_entry(tool_count, response_text) {
-            eprintln!("reflection write failed (non-fatal): {}", e);
-        }
-    }
-
-    fn write_reflection_entry(&self, tool_count: usize, response_text: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let home = imp_home()?;
+        let home = match imp_home() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
         let memory_dir = home.join("memory");
-        fs::create_dir_all(&memory_dir)?;
+        let _ = fs::create_dir_all(&memory_dir);
 
-        let now = Local::now();
-        let date_file = memory_dir.join(format!("{}.md", now.format("%Y-%m-%d")));
-        let time_str = now.format("%H:%M").to_string();
+        let date = Local::now().format("%Y-%m-%d").to_string();
+        let time = Local::now().format("%H:%M").to_string();
+        let filepath = memory_dir.join(format!("{}.md", date));
 
-        // Build a brief summary from the first line of the response
-        let summary: String = response_text
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("(no text)")
-            .chars()
-            .take(80)
-            .collect();
-
-        let snippet: String = response_text.chars().take(200).collect();
-
+        // Write structured context, not noise
         let entry = format!(
-            "\n## {} — {}\n- Tools used: {}\n- {}\n",
-            time_str, summary, tool_count, snippet
+            "\n## {} — Interaction\n**User asked:** {}\n**Summary:** {}\n",
+            time,
+            truncate(user_message, 150),
+            truncate(response_text, 300),
         );
 
-        let mut file = fs::OpenOptions::new()
+        let _ = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&date_file)?;
-        file.write_all(entry.as_bytes())?;
-        Ok(())
+            .open(&filepath)
+            .and_then(|mut f| f.write_all(entry.as_bytes()));
     }
 
     /// Write a session summary to the daily memory file. Called when the chat ends.
     pub fn write_session_summary(&self) {
-        if let Err(e) = self.write_session_summary_inner() {
-            eprintln!("session summary write failed (non-fatal): {}", e);
-        }
-    }
-
-    fn write_session_summary_inner(&self) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let home = imp_home()?;
+        let home = match imp_home() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
         let memory_dir = home.join("memory");
-        fs::create_dir_all(&memory_dir)?;
+        let _ = fs::create_dir_all(&memory_dir);
 
-        let now = Local::now();
-        let date_file = memory_dir.join(format!("{}.md", now.format("%Y-%m-%d")));
-        let time_str = now.format("%H:%M").to_string();
+        let date = Local::now().format("%Y-%m-%d").to_string();
+        let time = Local::now().format("%H:%M").to_string();
+        let filepath = memory_dir.join(format!("{}.md", date));
 
-        let elapsed = self.session_start.elapsed();
-        let duration_min = elapsed.as_secs() / 60;
-        let message_count = self.messages.len();
+        let duration = self.session_start.elapsed().as_secs() / 60;
 
         let entry = format!(
-            "\n## Session Summary ({})\n- Messages: {}\n- Tool calls: {}\n- Duration: ~{}m\n",
-            time_str, message_count, self.total_tool_calls, duration_min
+            "\n## {} — Session End\n- Duration: {}m, {} messages, {} tool calls\n",
+            time,
+            duration,
+            self.messages.len(),
+            self.total_tool_calls,
         );
 
-        let mut file = fs::OpenOptions::new()
+        let _ = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&date_file)?;
-        file.write_all(entry.as_bytes())?;
-        Ok(())
+            .open(&filepath)
+            .and_then(|mut f| f.write_all(entry.as_bytes()));
+    }
+}
+
+/// Truncate a string to a maximum character length, appending "..." if truncated.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max])
     }
 }
 

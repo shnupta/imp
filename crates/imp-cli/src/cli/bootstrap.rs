@@ -113,12 +113,12 @@ pub async fn run() -> Result<()> {
     config.save()?;
     println!("  ✅ config.toml");
 
-    // IDENTITY.md
-    let identity_content = include_str!("../../../../templates/global/IDENTITY.md")
+    // SOUL.md (identity + personality)
+    let soul_content = include_str!("../../../../templates/global/SOUL.md")
         .replace("{{name}}", &agent_name)
         .replace("{{persona}}", &persona);
-    fs::write(home.join("IDENTITY.md"), identity_content)?;
-    println!("  ✅ IDENTITY.md");
+    fs::write(home.join("SOUL.md"), soul_content)?;
+    println!("  ✅ SOUL.md");
 
     // MEMORY.md
     fs::write(

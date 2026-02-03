@@ -116,7 +116,7 @@ impl Agent {
         self.context.loaded_sections()
     }
 
-    /// The agent's display name, parsed from IDENTITY.md. Falls back to "Imp".
+    /// The agent's display name, parsed from SOUL.md (or IDENTITY.md). Falls back to "Imp".
     pub fn display_name(&self) -> String {
         self.context.agent_name().unwrap_or_else(|| "Imp".to_string())
     }

@@ -44,8 +44,12 @@ impl ContextManager {
 
         // ── L1: Always loaded (lean, <2k tokens) ────────────────────
 
-        // Core identity files — always needed
-        load_md(&home, "IDENTITY.md", "Identity", &mut l1_sections);
+        // Core identity files — always needed (SOUL.md preferred, IDENTITY.md fallback)
+        if home.join("SOUL.md").exists() {
+            load_md(&home, "SOUL.md", "Soul", &mut l1_sections);
+        } else {
+            load_md(&home, "IDENTITY.md", "Identity", &mut l1_sections);
+        }
         load_md(&home, "USER.md", "About Your Human", &mut l1_sections);
 
         // ── L2: Global files (on-demand) ─────────────────────────────
@@ -150,7 +154,8 @@ impl ContextManager {
             let home_section = format!(
                 "# Your Home Directory\n\n\
                 Your files are stored at ~/.imp/ (resolved to {}).\n\
-                - IDENTITY.md, USER.md — your core identity\n\
+                - SOUL.md — your identity and personality\n\
+                - USER.md — about your human\n\
                 - MEMORY.md — long-term memory (load when needed)\n\
                 - memory/YYYY-MM-DD.md — daily notes\n\
                 - projects/<name>/ — per-project context\n\n\
@@ -210,22 +215,34 @@ impl ContextManager {
             .collect()
     }
 
-    /// Extract the agent's name from the Identity section.
+    /// Extract the agent's name from the Soul/Identity section.
     pub fn agent_name(&self) -> Option<String> {
-        let identity = self.l1_sections.iter().find(|s| s.heading == "Identity")?;
-        // Try "**Your Name**: <name>"
-        for line in identity.content.lines() {
+        // Try Soul first, then Identity (legacy)
+        let section = self
+            .l1_sections
+            .iter()
+            .find(|s| s.heading == "Soul")
+            .or_else(|| self.l1_sections.iter().find(|s| s.heading == "Identity"))?;
+
+        for line in section.content.lines() {
             let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("**Your Name**:") {
+            // SOUL.md format: "**Name**: Foo" or "**Your Name**: Foo"
+            for prefix in &["**Name**:", "**Your Name**:"] {
+                if let Some(rest) = trimmed.strip_prefix(prefix) {
+                    let name = rest.trim();
+                    if !name.is_empty() && !name.contains("{{") {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+            // H1 format: "# Foo" (SOUL.md heading)
+            if let Some(rest) = trimmed.strip_prefix("# ") {
                 let name = rest.trim();
-                if !name.is_empty() && !name.contains("{{") {
+                if !name.is_empty() && !name.contains("{{") && !name.contains("Identity") {
                     return Some(name.to_string());
                 }
             }
-        }
-        // Fallback: "# Your Identity: <name>"
-        for line in identity.content.lines() {
-            let trimmed = line.trim();
+            // Legacy: "# Your Identity: Foo"
             if let Some(rest) = trimmed.strip_prefix("# Your Identity:") {
                 let name = rest.trim();
                 if !name.is_empty() && !name.contains("{{") {

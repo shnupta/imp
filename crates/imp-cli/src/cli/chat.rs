@@ -1,6 +1,7 @@
 use crate::agent::Agent;
 use crate::error::Result;
 use console::style;
+use dialoguer::Select;
 use std::io::{self, Write};
 
 pub async fn run(resume: bool, session: Option<String>) -> Result<()> {
@@ -29,6 +30,9 @@ pub async fn run(resume: bool, session: Option<String>) -> Result<()> {
         } else {
             println!("{}", style("No previous session found — starting fresh.").dim());
         }
+    } else {
+        // No flags — offer interactive session picker if previous sessions exist
+        maybe_show_session_picker(&mut agent)?;
     }
 
     println!(
@@ -78,6 +82,13 @@ pub async fn run(resume: bool, session: Option<String>) -> Result<()> {
             "quit" | "exit" | "bye" | "q" => {
                 agent.write_session_summary();
                 println!("{}", style(agent.usage().format_session_total()).dim());
+                // Auto-reflect if enabled and session was substantive
+                if agent.config().learning.auto_reflect && agent.total_tool_calls() > 0 {
+                    println!("{}", style("🧠 Reflecting on session...").dim());
+                    if let Err(e) = crate::cli::reflect::run(None).await {
+                        eprintln!("{}", style(format!("Reflection failed (non-fatal): {}", e)).dim());
+                    }
+                }
                 println!("👋 Goodbye!");
                 break;
             }
@@ -88,10 +99,6 @@ pub async fn run(resume: bool, session: Option<String>) -> Result<()> {
             }
             "help" => {
                 show_help();
-                continue;
-            }
-            "resume" => {
-                show_recent_sessions(&agent);
                 continue;
             }
             _ => {}
@@ -119,34 +126,103 @@ pub async fn run(resume: bool, session: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn show_recent_sessions(agent: &Agent) {
-    match agent.db().list_sessions(10) {
-        Ok(sessions) if sessions.is_empty() => {
-            println!("{}", style("No previous sessions found.").dim());
-        }
-        Ok(sessions) => {
-            println!("{}", style("Recent sessions:").bold());
-            for s in &sessions {
-                let short_id = &s.id[..s.id.len().min(8)];
-                let project = s.project.as_deref().unwrap_or("-");
-                let title = s.title.as_deref().unwrap_or("(untitled)");
-                println!(
-                    "  {} {} {} ({} msgs)",
-                    style(short_id).cyan(),
-                    style(project).dim(),
-                    title,
-                    s.message_count
-                );
-            }
+/// Show an interactive session picker if previous sessions exist for this project.
+fn maybe_show_session_picker(agent: &mut Agent) -> Result<()> {
+    let project_name = match agent.project_name() {
+        Some(name) => name.to_string(),
+        None => return Ok(()), // No project detected, skip picker
+    };
+
+    let current_session_id = agent.session_id().to_string();
+    let sessions = agent
+        .db()
+        .list_sessions_for_project(&project_name, &current_session_id, 5)?;
+
+    if sessions.is_empty() {
+        return Ok(()); // No previous sessions, continue with new
+    }
+
+    println!(
+        "{}",
+        style(format!("📂 Project: {}", project_name)).dim()
+    );
+    println!("{}", style("📎 New session").dim());
+    println!();
+
+    // Build picker items
+    let mut items: Vec<String> = Vec::new();
+    for s in &sessions {
+        let short_id = &s.id[..s.id.len().min(8)];
+        let age = format_relative_time(&s.updated_at);
+        items.push(format!(
+            "🔄 {} — {} messages ({})",
+            short_id, s.message_count, age
+        ));
+    }
+    items.push("✨ Start new session".to_string());
+
+    let default = items.len() - 1; // Default to "new session"
+
+    let selection = Select::new()
+        .with_prompt("Recent sessions")
+        .items(&items)
+        .default(default)
+        .interact_opt()
+        .unwrap_or(Some(default)); // On error, default to new session
+
+    match selection {
+        Some(idx) if idx < sessions.len() => {
+            // User picked a previous session
+            let chosen = &sessions[idx];
+            agent.resume(&chosen.id)?;
             println!(
                 "{}",
-                style("Use `imp chat --session <id>` to resume.").dim()
+                style(format!(
+                    "🔄 Resumed session: {} ({} messages)",
+                    &chosen.id[..chosen.id.len().min(8)],
+                    chosen.message_count
+                ))
+                .yellow()
             );
         }
-        Err(e) => {
-            println!("{}", style(format!("Error listing sessions: {}", e)).red());
+        _ => {
+            // New session (or cancelled)
         }
     }
+
+    Ok(())
+}
+
+/// Format an RFC3339 timestamp as a human-friendly relative time string.
+fn format_relative_time(rfc3339: &str) -> String {
+    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
+        return rfc3339.to_string();
+    };
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(ts);
+
+    let minutes = duration.num_minutes();
+    if minutes < 1 {
+        return "just now".to_string();
+    }
+    if minutes < 60 {
+        return format!("{} min ago", minutes);
+    }
+    let hours = duration.num_hours();
+    if hours < 24 {
+        if hours == 1 {
+            return "1 hour ago".to_string();
+        }
+        return format!("{} hours ago", hours);
+    }
+    let days = duration.num_days();
+    if days == 1 {
+        return "yesterday".to_string();
+    }
+    if days < 7 {
+        return format!("{} days ago", days);
+    }
+    format!("{} weeks ago", days / 7)
 }
 
 fn show_help() {
@@ -155,10 +231,6 @@ fn show_help() {
     println!(
         "  {} - Clear conversation history",
         style("clear").cyan()
-    );
-    println!(
-        "  {} - List recent sessions",
-        style("resume").cyan()
     );
     println!("  {} - Show this help message", style("help").cyan());
     println!("  {} - Ask anything else!", style("<your message>").cyan());

@@ -205,6 +205,43 @@ impl Database {
         }
     }
 
+    /// List recent sessions for a specific project, newest first.
+    /// Excludes the given `exclude_id` (the current session just created).
+    pub fn list_sessions_for_project(
+        &self,
+        project: &str,
+        exclude_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionInfo>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, project, created_at, updated_at, title, message_count \
+                 FROM sessions WHERE project = ?1 AND id != ?2 AND message_count > 0 \
+                 ORDER BY updated_at DESC LIMIT ?3",
+            )
+            .map_err(|e| ImpError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![project, exclude_id, limit as i64], |row| {
+                Ok(SessionInfo {
+                    id: row.get(0)?,
+                    project: row.get(1)?,
+                    created_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    title: row.get(4)?,
+                    message_count: row.get(5)?,
+                })
+            })
+            .map_err(|e| ImpError::Database(e.to_string()))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| ImpError::Database(e.to_string()))?);
+        }
+        Ok(result)
+    }
+
     /// Set a human-readable title on a session.
     pub fn update_session_title(&self, session_id: &str, title: &str) -> Result<()> {
         self.conn

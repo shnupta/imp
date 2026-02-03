@@ -254,6 +254,14 @@ impl Agent {
         &self.usage
     }
 
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub fn total_tool_calls(&self) -> usize {
+        self.total_tool_calls
+    }
+
     /// Distill structured insights from a conversation turn into the daily memory file.
     /// Only writes if the turn was substantive (had tool calls or a long response).
     fn maybe_distill_insights(&mut self, user_message: &str, response_text: &str, tool_count: usize) {

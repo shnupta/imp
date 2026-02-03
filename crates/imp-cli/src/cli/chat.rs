@@ -6,7 +6,6 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::mpsc;
 
 pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> Result<()> {
     let mut agent = Agent::new().await?;
@@ -74,8 +73,9 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
     // Set up rustyline editor for input with history
     let mut rl = DefaultEditor::new().expect("Failed to initialize line editor");
 
-    // Channel for sub-agent completion notifications (background watcher → main loop)
-    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<String>();
+    // Shared flag: background watcher sets this when a sub-agent completes.
+    // Allows us to print a notification to stderr without touching stdin.
+    let subagent_done = Arc::new(AtomicBool::new(false));
 
     loop {
         // Before prompting, check for completed sub-agents and auto-summarize
@@ -84,23 +84,26 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
             auto_summarize_subagents(&mut agent, completed).await;
         }
 
-        // Also drain any notifications from the background watcher
-        while let Ok(msg) = notify_rx.try_recv() {
-            eprintln!("{}", style(msg).yellow());
-        }
-
-        // Start a background sub-agent watcher if any are active
+        // Start a background sub-agent watcher if any are active.
+        // This ONLY prints to stderr — never touches stdin.
         let watcher_handle = if agent.has_active_subagents() {
-            let tx = notify_tx.clone();
-            let check_ids: Vec<u64> = agent.active_subagent_ids();
+            let done_flag = subagent_done.clone();
+            done_flag.store(false, Ordering::SeqCst);
             Some(tokio::spawn(async move {
-                // Poll every 2 seconds, send a notification when something finishes
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    // We can't check the actual handles from here, so just send a ping
-                    // The main loop will collect results after readline returns
-                    let _ = tx.send(format!("📬 Sub-agent(s) may have completed — press Enter to check (agents: {:?})", check_ids));
-                    break; // Only notify once per readline cycle
+                    // We check a simple flag; the actual handle check happens in the main loop
+                    // This is just a timer that fires a notification
+                    if !done_flag.load(Ordering::SeqCst) {
+                        done_flag.store(true, Ordering::SeqCst);
+                        // Print notification to stderr — safe while readline is active.
+                        // Rustyline redraws the prompt on the next keypress.
+                        eprintln!(
+                            "\n{}",
+                            style("📬 Sub-agent work may be done — press Enter to see results").yellow()
+                        );
+                    }
+                    break;
                 }
             }))
         } else {
@@ -170,7 +173,12 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
 
         let input = full_input.trim();
 
+        // Empty input: check for sub-agent completions (user pressed Enter after notification)
         if input.is_empty() {
+            let completed = agent.collect_completed_subagents().await;
+            if !completed.is_empty() {
+                auto_summarize_subagents(&mut agent, completed).await;
+            }
             continue;
         }
 

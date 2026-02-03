@@ -179,11 +179,12 @@ impl SubAgent {
             Your task: {}\n\n\
             Working directory: {}\n\n\
             You have access to file and shell tools. Complete the task and provide a clear summary of what you did.\n\
-            Write to files, don't just describe changes. Be thorough but efficient.\n\
-            When you are done, provide a final summary starting with 'TASK COMPLETE:' that lists:\n\
-            1. What you accomplished\n\
+            Write to files, don't just describe changes. Be thorough but efficient.\n\n\
+            When you are done, your ENTIRE final message should start with 'TASK COMPLETE:' followed by:\n\
+            1. Key findings and results (the substantive content — this is the most important part)\n\
             2. Files you created or modified\n\
-            3. Any issues or caveats",
+            3. Any issues or caveats\n\n\
+            Put ALL your important findings/analysis inside the TASK COMPLETE block, not before it.",
             self.task, self.working_directory
         );
 
@@ -314,16 +315,21 @@ impl SubAgent {
 }
 
 /// Extract a summary from the agent's final response.
-/// Looks for "TASK COMPLETE:" prefix; falls back to first ~500 chars.
+/// Looks for "TASK COMPLETE:" prefix; falls back to the full response.
 fn extract_summary(text: &str) -> String {
     // Try to find our structured summary marker
     if let Some(idx) = text.find("TASK COMPLETE:") {
-        return text[idx..].to_string();
+        // If TASK COMPLETE is near the start, just return from there
+        if idx < 200 {
+            return text[idx..].to_string();
+        }
+        // If there's substantial content before the marker, include it all
+        return text.to_string();
     }
 
-    // Fallback: return the full text, truncated
-    if text.chars().count() > 500 {
-        let preview: String = text.chars().take(500).collect();
+    // Fallback: return the full text, truncated if very long
+    if text.chars().count() > 2000 {
+        let preview: String = text.chars().take(2000).collect();
         format!("{}...", preview)
     } else {
         text.to_string()

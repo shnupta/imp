@@ -262,7 +262,8 @@ impl Config {
         }
     }
 
-    /// Detect token type from token string and update config accordingly
+    /// Detect token type from token string and update config accordingly.
+    /// Unknown token formats are stored as plain API keys (for proxy/LiteLLM use).
     pub fn setup_token_auto_detect(&mut self, token: String) -> Result<()> {
         if token.starts_with("sk-ant-oat") {
             // OAuth token - store as OAuth
@@ -273,15 +274,11 @@ impl Config {
                 expires_at: chrono::Utc::now().timestamp() + 365 * 24 * 60 * 60, // 1 year
             });
             self.auth.api_key = None;
-        } else if token.starts_with("sk-ant-api") {
-            // API key - store as API key
+        } else {
+            // API key (Anthropic or proxy/LiteLLM token) - store as API key
             self.auth.method = AuthMethod::ApiKey;
             self.auth.api_key = Some(ApiKeyConfig { key: token });
             self.auth.oauth = None;
-        } else {
-            return Err(ImpError::Config(
-                "Token doesn't look like a valid Anthropic token (should start with 'sk-ant-api' or 'sk-ant-oat')".to_string()
-            ));
         }
         
         self.save()

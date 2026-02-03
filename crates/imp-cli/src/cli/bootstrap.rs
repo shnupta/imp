@@ -36,6 +36,8 @@ pub async fn run() -> Result<()> {
     println!("3. Copy the token that appears");
     println!("4. Paste it below\n");
     
+    let mut custom_base_url: Option<String> = None;
+
     let token = loop {
         let input_token = Password::new()
             .with_prompt("Enter your Anthropic token (from 'claude setup-token')")
@@ -49,17 +51,28 @@ pub async fn run() -> Result<()> {
         if !input_token.starts_with("sk-ant-") {
             println!(
                 "{}",
-                style("⚠️  Warning: token doesn't look like an Anthropic token (should start with 'sk-ant-')")
+                style("⚠️  Token doesn't look like a standard Anthropic token.")
                     .yellow()
             );
+            println!("If you're using a proxy (e.g. LiteLLM), you'll need to provide the base URL.\n");
             
-            let continue_anyway = Confirm::new()
-                .with_prompt("Continue with this token anyway?")
-                .default(false)
+            let base_url: String = Input::new()
+                .with_prompt("API base URL (or press Enter to use api.anthropic.com)")
+                .default(String::new())
                 .interact()?;
             
-            if !continue_anyway {
-                continue;
+            if !base_url.trim().is_empty() {
+                custom_base_url = Some(base_url.trim().to_string());
+            } else {
+                // No base URL and non-standard token — confirm they want to proceed
+                let continue_anyway = Confirm::new()
+                    .with_prompt("No custom URL set. Continue with this token for api.anthropic.com?")
+                    .default(false)
+                    .interact()?;
+                
+                if !continue_anyway {
+                    continue;
+                }
             }
         }
         
@@ -102,7 +115,7 @@ pub async fn run() -> Result<()> {
             provider: "anthropic".to_string(),
             model: "claude-opus-4-5-20251101".to_string(),
             max_tokens: 16384,
-            base_url: None,
+            base_url: custom_base_url,
             api_key: None, // Legacy field - not used in new format
         },
         auth: AuthConfig::default(),

@@ -162,7 +162,28 @@ impl ClaudeClient {
         });
 
         if let Some(system) = system_prompt {
-            request_body["system"] = json!(system);
+            // OAuth tokens require Claude Code identity prefix
+            if self.config.auth_method() == &AuthMethod::OAuth {
+                request_body["system"] = json!([
+                    {
+                        "type": "text",
+                        "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                        "cache_control": { "type": "ephemeral" }
+                    },
+                    {
+                        "type": "text",
+                        "text": system
+                    }
+                ]);
+            } else {
+                request_body["system"] = json!(system);
+            }
+        } else if self.config.auth_method() == &AuthMethod::OAuth {
+            request_body["system"] = json!([{
+                "type": "text",
+                "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                "cache_control": { "type": "ephemeral" }
+            }]);
         }
 
         if let Some(tools_value) = tools {

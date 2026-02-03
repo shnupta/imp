@@ -98,27 +98,43 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
                         }
                     }
                     completed = agent.wait_for_subagent() => {
-                        // Sub-agent finished! Print notification immediately.
-                        for result in &completed {
-                            let status = if result.success { "✅" } else { "❌" };
-                            eprintln!(
-                                "\n{}",
-                                style(format!(
-                                    "📬 Sub-agent #{} finished {} — {}",
-                                    result.id,
-                                    status,
-                                    if result.summary.len() > 80 {
-                                        let preview: String = result.summary.chars().take(80).collect();
-                                        format!("{}...", preview)
-                                    } else if result.summary.is_empty() {
-                                        "(no summary)".to_string()
-                                    } else {
-                                        result.summary.clone()
-                                    }
-                                )).yellow()
-                            );
+                        // Sub-agent finished! Print notification and auto-summarize.
+                        let results_text = completed
+                            .iter()
+                            .map(|r| r.format_report())
+                            .collect::<Vec<_>>()
+                            .join("\n---\n");
+
+                        eprintln!(
+                            "\n{}",
+                            style(format!("📬 {} sub-agent(s) completed — generating summary...", completed.len())).yellow()
+                        );
+
+                        // Auto-trigger agent response with sub-agent results
+                        let synthetic_msg = format!(
+                            "[Sub-agent results — {} task(s) completed]\n\n{}\n\n\
+                            Summarize what the sub-agent accomplished. Be concise.",
+                            completed.len(),
+                            results_text
+                        );
+
+                        println!(
+                            "\n{}",
+                            style(format!("{}:", agent.display_name())).bold().blue()
+                        );
+                        println!("{}", style("─".repeat(20)).dim());
+
+                        match agent.process_message(&synthetic_msg, true).await {
+                            Ok(_) => {
+                                println!("\n{}", style("─".repeat(50)).dim());
+                                println!();
+                            }
+                            Err(e) => {
+                                eprintln!("{}", style(format!("⚠ Failed to summarize: {}", e)).dim());
+                            }
                         }
-                        // Continue loop — readline future was cancelled, we'll restart it
+
+                        // Continue loop — readline future was cancelled, restart it
                         continue;
                     }
                 }

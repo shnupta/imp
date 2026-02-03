@@ -16,7 +16,7 @@ mod error;
 mod project;
 mod tools;
 
-use cli::{bootstrap, chat, login, oneshot, project_cmd};
+use cli::{bootstrap, chat, learn, login, oneshot, project_cmd};
 
 #[derive(Parser)]
 #[command(name = "imp")]
@@ -43,6 +43,8 @@ enum Commands {
     },
     /// Start an interactive chat session
     Chat,
+    /// Teach your agent something new
+    Learn,
     /// Manage projects
     Project {
         #[command(subcommand)]
@@ -80,6 +82,9 @@ async fn main() -> Result<()> {
         }
         Commands::Chat => {
             chat::run().await?;
+        }
+        Commands::Learn => {
+            learn::run().await?;
         }
         Commands::Project { command } => match command {
             ProjectCommands::List => {

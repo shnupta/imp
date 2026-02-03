@@ -13,6 +13,7 @@ use crate::project::ProjectInfo;
 use chrono::Local;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 /// Two-layer context manager.
 ///
@@ -82,6 +83,9 @@ impl ContextManager {
                     &mut sections,
                 );
             }
+
+            // ── Git Context ───────────────────────────────────────────
+            load_git_context(Path::new(&proj.path), &proj.name, &mut sections);
         }
 
         Ok(Self { sections })
@@ -89,16 +93,30 @@ impl ContextManager {
 
     /// Assemble the full system prompt from all loaded sections.
     pub fn assemble_system_prompt(&self) -> String {
-        if self.sections.is_empty() {
-            return "You are a personal AI agent with memory and learning capabilities."
-                .to_string();
+        let mut prompt_parts = Vec::new();
+
+        // Add agent home directory information
+        if let Ok(home) = imp_home() {
+            let home_section = format!(
+                "# Your Home Directory\n\nYour files are stored at ~/.imp/ (resolved to {}).\n- IDENTITY.md, USER.md, MEMORY.md — your core context\n- memory/YYYY-MM-DD.md — daily notes\n- projects/<name>/ — per-project context\n\nUse file_read and file_write tools with these ABSOLUTE paths to read and update your context files.",
+                home.display()
+            );
+            prompt_parts.push(home_section);
         }
 
-        self.sections
-            .iter()
-            .map(|s| format!("# {}\n\n{}", s.heading, s.content))
-            .collect::<Vec<_>>()
-            .join("\n\n---\n\n")
+        if self.sections.is_empty() {
+            if prompt_parts.is_empty() {
+                return "You are a personal AI agent with memory and learning capabilities."
+                    .to_string();
+            }
+        } else {
+            // Add all loaded context sections
+            for section in &self.sections {
+                prompt_parts.push(format!("# {}\n\n{}", section.heading, section.content));
+            }
+        }
+
+        prompt_parts.join("\n\n---\n\n")
     }
 
     /// List all loaded section headings (for display).
@@ -181,4 +199,45 @@ fn has_meaningful_content(content: &str) -> bool {
         let l = line.trim();
         !l.is_empty() && !l.starts_with('#') && !l.starts_with("<!--")
     })
+}
+
+/// Load git context (recent commits and diff stats) if the project is a git repo.
+fn load_git_context(project_path: &Path, project_name: &str, sections: &mut Vec<ContextSection>) {
+    let mut git_info = Vec::new();
+
+    // Try to get recent git log
+    if let Ok(output) = Command::new("git")
+        .args(&["log", "--oneline", "-10"])
+        .current_dir(project_path)
+        .output()
+    {
+        if output.status.success() {
+            let log_output = String::from_utf8_lossy(&output.stdout);
+            if !log_output.trim().is_empty() {
+                git_info.push(format!("Recent commits:\n{}", log_output.trim()));
+            }
+        }
+    }
+
+    // Try to get diff stats
+    if let Ok(output) = Command::new("git")
+        .args(&["diff", "--stat"])
+        .current_dir(project_path)
+        .output()
+    {
+        if output.status.success() {
+            let diff_output = String::from_utf8_lossy(&output.stdout);
+            if !diff_output.trim().is_empty() {
+                git_info.push(format!("Current changes:\n{}", diff_output.trim()));
+            }
+        }
+    }
+
+    // If we have git information, add it as a context section
+    if !git_info.is_empty() {
+        sections.push(ContextSection {
+            heading: format!("Recent Git Activity — {}", project_name),
+            content: git_info.join("\n\n"),
+        });
+    }
 }

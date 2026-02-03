@@ -74,6 +74,7 @@ pub async fn run() -> Result<()> {
         llm: crate::config::LlmConfig {
             provider: "anthropic".to_string(),
             model: "claude-opus-4-5-20251101".to_string(),
+            max_tokens: 16384,
             api_key: None,
         },
         auth: Default::default(),

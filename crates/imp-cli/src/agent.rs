@@ -5,6 +5,7 @@ use crate::error::{ImpError, Result};
 use crate::project::{self, ProjectInfo, ProjectRegistry};
 use crate::tools::ToolRegistry;
 use console::style;
+use serde_json::json;
 use termimad::*;
 
 pub struct Agent {
@@ -79,10 +80,7 @@ impl Agent {
     }
 
     async fn process_message_with_options(&mut self, user_message: &str, stream: bool, render_markdown: bool) -> Result<String> {
-        self.messages.push(Message {
-            role: "user".to_string(),
-            content: user_message.to_string(),
-        });
+        self.messages.push(Message::text("user", user_message));
 
         let mut iteration_count = 0;
         let max_iterations = 10;
@@ -101,22 +99,10 @@ impl Agent {
             let text_content = self.client.extract_text_content(&response);
             let tool_calls = self.client.extract_tool_calls(&response);
 
-            if !text_content.is_empty() || !tool_calls.is_empty() {
-                let mut content = text_content.clone();
-                if !tool_calls.is_empty() {
-                    if !content.is_empty() {
-                        content.push_str("\n\n");
-                    }
-                    content.push_str(&format!(
-                        "I need to use {} tool(s) to help with this.",
-                        tool_calls.len()
-                    ));
-                }
-
-                self.messages.push(Message {
-                    role: "assistant".to_string(),
-                    content,
-                });
+            // CRITICAL: Preserve raw content blocks (text + tool_use) for proper protocol
+            let content_blocks = self.client.extract_content_blocks(&response);
+            if !content_blocks.is_empty() {
+                self.messages.push(Message::with_content("assistant", json!(content_blocks)));
             }
 
             if tool_calls.is_empty() {
@@ -142,26 +128,29 @@ impl Agent {
                     })
                     .await?;
 
-                tool_results.push(result);
+                // Convert to proper ToolResult format for Anthropic
+                let anthropic_result = crate::client::ToolResult {
+                    tool_use_id: result.tool_use_id,
+                    content: if let Some(ref error) = result.error {
+                        error.clone()
+                    } else {
+                        result.content
+                    },
+                    is_error: result.error.is_some().then(|| true),
+                };
 
-                if let Some(ref error) = tool_results.last().unwrap().error {
+                tool_results.push(anthropic_result);
+
+                if let Some(ref error) = result.error {
                     println!("{}", style(format!("❌ Tool error: {}", error)).red());
                 } else {
                     println!("{}", style("✅ Tool completed successfully").green());
                 }
             }
 
-            for tool_result in tool_results {
-                let result_content = if let Some(ref error) = tool_result.error {
-                    format!("Error: {}", error)
-                } else {
-                    tool_result.content
-                };
-
-                self.messages.push(Message {
-                    role: "user".to_string(),
-                    content: format!("Tool result: {}", result_content),
-                });
+            // CRITICAL: Send tool results as proper tool_result content blocks
+            if !tool_results.is_empty() {
+                self.messages.push(Message::tool_results(tool_results));
             }
         }
 

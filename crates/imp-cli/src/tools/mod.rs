@@ -53,7 +53,7 @@ pub struct ToolCall {
 
 #[derive(Debug, Serialize)]
 pub struct ToolResult {
-    pub tool_call_id: String,
+    pub tool_use_id: String,
     pub content: String,
     pub error: Option<String>,
 }
@@ -169,12 +169,12 @@ impl ToolRegistry {
 
         match result {
             Ok(content) => Ok(ToolResult {
-                tool_call_id: tool_call.id.clone(),
+                tool_use_id: tool_call.id.clone(),
                 content,
                 error: None,
             }),
             Err(e) => Ok(ToolResult {
-                tool_call_id: tool_call.id.clone(),
+                tool_use_id: tool_call.id.clone(),
                 content: String::new(),
                 error: Some(e.to_string()),
             }),

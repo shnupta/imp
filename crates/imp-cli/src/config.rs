@@ -15,6 +15,8 @@ pub struct LlmConfig {
     pub provider: String,
     #[serde(default = "default_model")]
     pub model: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
     /// Legacy API key field - still supported for backward compatibility
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -52,6 +54,10 @@ pub struct ApiKeyConfig {
 
 fn default_model() -> String {
     "claude-opus-4-5-20251101".to_string()
+}
+
+fn default_max_tokens() -> u32 {
+    16384
 }
 
 fn default_auth_method() -> AuthMethod {

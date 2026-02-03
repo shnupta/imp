@@ -9,7 +9,69 @@ use std::time::Duration;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
-    pub content: String,
+    pub content: Value,
+}
+
+impl Message {
+    /// Create a simple text message
+    pub fn text(role: &str, text: &str) -> Self {
+        Self {
+            role: role.to_string(),
+            content: Value::String(text.to_string()),
+        }
+    }
+
+    /// Create a message with structured content blocks
+    pub fn with_content(role: &str, content: Value) -> Self {
+        Self {
+            role: role.to_string(),
+            content,
+        }
+    }
+
+    /// Create a tool result message
+    pub fn tool_results(results: Vec<ToolResult>) -> Self {
+        let content_blocks: Vec<Value> = results
+            .into_iter()
+            .map(|result| {
+                let mut block = json!({
+                    "type": "tool_result",
+                    "tool_use_id": result.tool_use_id,
+                    "content": result.content
+                });
+                if result.is_error.unwrap_or(false) {
+                    block["is_error"] = Value::Bool(true);
+                }
+                block
+            })
+            .collect();
+
+        Self {
+            role: "user".to_string(),
+            content: Value::Array(content_blocks),
+        }
+    }
+
+    /// Get the text content from this message (for display purposes)
+    pub fn text_content(&self) -> String {
+        match &self.content {
+            Value::String(text) => text.clone(),
+            Value::Array(blocks) => {
+                blocks
+                    .iter()
+                    .filter_map(|block| {
+                        if let Some(text_block) = block.get("text") {
+                            text_block.as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            }
+            _ => String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,7 +221,7 @@ impl ClaudeClient {
 
         let mut request_body = json!({
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": self.config.llm.max_tokens,
             "messages": messages,
         });
 
@@ -274,7 +336,7 @@ impl ClaudeClient {
                                             "input_json_delta" => {
                                                 if let Some(partial_json) = delta.partial_json {
                                                     if let Some(index) = event.index {
-                                                        if let Some((id, name, ref mut accumulated_input)) = tool_calls_in_progress.get_mut(&index) {
+                                                        if let Some((_id, _name, ref mut accumulated_input)) = tool_calls_in_progress.get_mut(&index) {
                                                             accumulated_input.push_str(&partial_json);
                                                         }
                                                     }
@@ -366,6 +428,26 @@ impl ClaudeClient {
                     input: input.clone(),
                 }),
                 _ => None,
+            })
+            .collect()
+    }
+
+    /// Extract raw content blocks from response (preserves tool_use blocks)
+    pub fn extract_content_blocks(&self, response: &AnthropicResponse) -> Vec<Value> {
+        response
+            .content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::Text { text } => json!({
+                    "type": "text",
+                    "text": text
+                }),
+                ContentBlock::ToolUse { id, name, input } => json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": input
+                }),
             })
             .collect()
     }

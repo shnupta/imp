@@ -10,8 +10,6 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
-    #[serde(default)]
-    pub learning: LearningConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -71,25 +69,6 @@ impl Default for ThinkingConfig {
             budget_tokens: default_budget_tokens(),
         }
     }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LearningConfig {
-    /// Automatically run reflection/distillation at session end
-    #[serde(default = "default_auto_reflect")]
-    pub auto_reflect: bool,
-}
-
-impl Default for LearningConfig {
-    fn default() -> Self {
-        Self {
-            auto_reflect: default_auto_reflect(),
-        }
-    }
-}
-
-fn default_auto_reflect() -> bool {
-    true
 }
 
 fn default_thinking_enabled() -> bool {

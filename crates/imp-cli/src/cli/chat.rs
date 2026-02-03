@@ -82,13 +82,6 @@ pub async fn run(resume: bool, session: Option<String>) -> Result<()> {
             "quit" | "exit" | "bye" | "q" => {
                 agent.write_session_summary();
                 println!("{}", style(agent.usage().format_session_total()).dim());
-                // Auto-reflect if enabled and session was substantive
-                if agent.config().learning.auto_reflect && agent.total_tool_calls() > 0 {
-                    println!("{}", style("🧠 Reflecting on session...").dim());
-                    if let Err(e) = crate::cli::reflect::run(None).await {
-                        eprintln!("{}", style(format!("Reflection failed (non-fatal): {}", e)).dim());
-                    }
-                }
                 println!("👋 Goodbye!");
                 break;
             }

@@ -18,7 +18,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use termimad::*;
+// termimad used via highlight module
 
 /// Shared handle to a rustyline ExternalPrinter for output that doesn't garble
 /// the readline prompt. When the printer is set, all agent output routes through
@@ -51,14 +51,10 @@ pub struct Agent {
 
 impl Agent {
     /// Render markdown text to a string for emission through the printer.
-    /// Code blocks with language tags get syntax highlighting via syntect.
+    /// Prose goes through termimad; code blocks are rendered directly with
+    /// syntect highlighting and a full-width background rectangle.
     fn render_markdown_to_string(text: &str) -> String {
-        if text.trim().is_empty() {
-            return String::new();
-        }
-        let highlighted = highlight::highlight_code_blocks(text);
-        let skin = MadSkin::default();
-        format!("{}", skin.term_text(&highlighted))
+        highlight::render_markdown(text)
     }
 
     /// Emit a line of output through the ExternalPrinter (readline-safe) if

@@ -79,6 +79,7 @@ pub async fn run() -> Result<()> {
         },
         auth: Default::default(),
         thinking: Default::default(),
+        mcp: Default::default(),
     });
     
     // Auto-detect token type and configure

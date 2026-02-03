@@ -15,7 +15,7 @@ use std::process::Command;
 pub mod builtin;
 pub mod mcp;
 
-use mcp::{McpRegistry, convert_mcp_to_anthropic_schema};
+use mcp::McpRegistry;
 
 #[derive(Debug, Deserialize)]
 pub struct ToolDefinition {
@@ -74,18 +74,21 @@ impl ToolRegistry {
         }
     }
 
-    pub async fn load_from_directory<P: AsRef<Path>>(&mut self, tools_dir: P) -> Result<()> {
+    pub async fn load_from_directory<P: AsRef<Path>>(
+        &mut self,
+        tools_dir: P,
+        config: &crate::config::Config,
+    ) -> Result<()> {
         let tools_dir = tools_dir.as_ref();
-        
+
         // Load builtin tools
         self.load_builtin_tools();
-        
-        // Load tools from TOML files if directory exists
+
+        // Load custom tools from TOML files if directory exists
         if tools_dir.exists() {
             for entry in fs::read_dir(tools_dir)? {
                 let entry = entry?;
                 let path = entry.path();
-                
                 if path.is_file() && path.extension().map_or(false, |ext| ext == "toml") {
                     let content = fs::read_to_string(&path)?;
                     let tool_def: ToolDefinition = toml::from_str(&content)?;
@@ -94,36 +97,10 @@ impl ToolRegistry {
             }
         }
 
-        // Load MCP servers from ~/.imp/mcp/ directory
-        if let Ok(imp_home) = crate::config::imp_home() {
-            let mcp_dir = imp_home.join("mcp");
-            if let Err(e) = self.mcp_registry.load_from_directory(&mcp_dir).await {
-                eprintln!("Warning: Failed to load MCP servers: {}", e);
-            }
-        }
-
-        Ok(())
-    }
-    
-    /// Load only the tools (synchronous version for compatibility).
-    /// This is used where async is not available, but MCP won't be loaded.
-    pub fn load_from_directory_sync<P: AsRef<Path>>(&mut self, tools_dir: P) -> Result<()> {
-        let tools_dir = tools_dir.as_ref();
-        
-        // Load builtin tools
-        self.load_builtin_tools();
-        
-        // Load tools from TOML files if directory exists
-        if tools_dir.exists() {
-            for entry in fs::read_dir(tools_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                
-                if path.is_file() && path.extension().map_or(false, |ext| ext == "toml") {
-                    let content = fs::read_to_string(&path)?;
-                    let tool_def: ToolDefinition = toml::from_str(&content)?;
-                    self.tools.insert(tool_def.tool.name.clone(), tool_def);
-                }
+        // Load MCP servers from config.toml [mcp] section
+        if !config.mcp.is_empty() {
+            if let Err(e) = self.mcp_registry.load_from_config(&config.mcp).await {
+                eprintln!("⚠ Failed to load MCP servers: {}", e);
             }
         }
 
@@ -163,27 +140,26 @@ impl ToolRegistry {
         for tool in builtins {
             self.tools.insert(tool.tool.name.clone(), tool);
         }
-        
-        // Note: MCP tools are not loaded for subagents in the current design.
-        // This could be extended in the future if needed.
+
     }
-    
-    /// Async version of subagent builtin loading that also loads MCP tools.
-    pub async fn load_subagent_builtins_with_mcp(&mut self) -> Result<()> {
+
+    /// Load subagent builtins + MCP tools from config.
+    pub async fn load_subagent_builtins_with_mcp(
+        &mut self,
+        config: &crate::config::Config,
+    ) -> Result<()> {
         self.load_subagent_builtins();
-        
-        // Load MCP servers for sub-agents too
-        if let Ok(imp_home) = crate::config::imp_home() {
-            let mcp_dir = imp_home.join("mcp");
-            if let Err(e) = self.mcp_registry.load_from_directory(&mcp_dir).await {
-                eprintln!("Warning: Failed to load MCP servers for subagent: {}", e);
+
+        if !config.mcp.is_empty() {
+            if let Err(e) = self.mcp_registry.load_from_config(&config.mcp).await {
+                eprintln!("⚠ Failed to load MCP servers for subagent: {}", e);
             }
         }
-        
+
         Ok(())
     }
 
-    pub async fn get_tool_schemas(&self) -> Value {
+    pub async fn get_tool_schemas(&mut self) -> Value {
         let mut schemas = Vec::new();
 
         // Add builtin and custom tools
@@ -198,7 +174,7 @@ impl ToolRegistry {
 
                 let mut param_schema = serde_json::Map::new();
                 param_schema.insert("type".to_string(), Value::String(param_def.param_type.clone()));
-                
+
                 if let Some(ref desc) = param_def.description {
                     param_schema.insert("description".to_string(), Value::String(desc.clone()));
                 }
@@ -218,25 +194,15 @@ impl ToolRegistry {
 
             schemas.push(schema);
         }
-        
-        // Add MCP tools
-        match self.mcp_registry.get_all_tools().await {
-            Ok(mcp_tools) => {
-                for mcp_tool_def in mcp_tools {
-                    let schema = convert_mcp_to_anthropic_schema(&mcp_tool_def.mcp_tool);
-                    schemas.push(schema);
-                }
-            }
-            Err(e) => {
-                eprintln!("Warning: Failed to get MCP tool schemas: {}", e);
-            }
-        }
+
+        // Add MCP tool schemas
+        let mcp_schemas = self.mcp_registry.get_tool_schemas().await;
+        schemas.extend(mcp_schemas);
 
         Value::Array(schemas)
     }
-    
-    /// Synchronous version of get_tool_schemas for compatibility.
-    /// This will not include MCP tools.
+
+    /// Synchronous version — does not include MCP tools.
     pub fn get_tool_schemas_sync(&self) -> Value {
         let mut schemas = Vec::new();
 
@@ -251,7 +217,7 @@ impl ToolRegistry {
 
                 let mut param_schema = serde_json::Map::new();
                 param_schema.insert("type".to_string(), Value::String(param_def.param_type.clone()));
-                
+
                 if let Some(ref desc) = param_def.description {
                     param_schema.insert("description".to_string(), Value::String(desc.clone()));
                 }
@@ -275,7 +241,7 @@ impl ToolRegistry {
         Value::Array(schemas)
     }
 
-    pub async fn execute_tool(&self, tool_call: &ToolCall) -> Result<ToolResult> {
+    pub async fn execute_tool(&mut self, tool_call: &ToolCall) -> Result<ToolResult> {
         // First check if it's a built-in or custom tool
         if let Some(tool_def) = self.tools.get(&tool_call.name) {
             let result = match tool_def.handler.kind.as_str() {
@@ -308,7 +274,7 @@ impl ToolRegistry {
                 }),
             };
         }
-        
+
         // If not a built-in tool, try MCP
         match self.mcp_registry.call_tool(&tool_call.name, &tool_call.arguments).await {
             Ok(content) => Ok(ToolResult {
@@ -326,7 +292,7 @@ impl ToolRegistry {
 
     fn render_template(&self, template: &str, args: &Value) -> Result<String> {
         let mut result = template.to_string();
-        
+
         if let Value::Object(map) = args {
             for (key, value) in map {
                 let placeholder = format!("{{{{{}}}}}", key);
@@ -454,7 +420,7 @@ impl ToolRegistry {
         ToolDefinition {
             tool: ToolMeta {
                 name: "file_edit".to_string(),
-                description: "Edit a file by replacing exact text. old_text must match exactly one location in the file (including whitespace and indentation). If it matches multiple locations, the edit is rejected — include more surrounding context to be unique. Returns the affected line range.".to_string(),
+                description: "Edit a file by replacing exact text. old_text must match exactly one location in the file (including whitespace and indentation). If it matches multiple locations, the edit is rejected - include more surrounding context to be unique. Returns the affected line range.".to_string(),
                 parameters: {
                     let mut params = HashMap::new();
                     params.insert("path".to_string(), ParameterDef {
@@ -557,7 +523,7 @@ impl ToolRegistry {
                         param_type: "string".to_string(),
                         required: true,
                         default: None,
-                        description: Some("Clear, complete description of what the sub-agent should do. Include ALL context needed — sub-agents cannot ask clarifying questions.".to_string()),
+                        description: Some("Clear, complete description of what the sub-agent should do. Include ALL context needed - sub-agents cannot ask clarifying questions.".to_string()),
                     });
                     params.insert("max_tokens_budget".to_string(), ParameterDef {
                         param_type: "integer".to_string(),

@@ -10,6 +10,37 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    /// MCP server configurations. Key is the server name.
+    #[serde(default)]
+    pub mcp: std::collections::HashMap<String, McpServerConfig>,
+}
+
+/// Configuration for an MCP server.
+/// Transport is auto-detected: `url` → SSE, `command` → stdio.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct McpServerConfig {
+    /// SSE transport: URL of the MCP server
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Stdio transport: command to spawn
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Stdio transport: arguments for the command
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Environment variables (supports ${VAR} expansion)
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub env: std::collections::HashMap<String, String>,
+    /// HTTP headers for SSE transport (supports ${VAR} expansion)
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub headers: std::collections::HashMap<String, String>,
+}
+
+impl McpServerConfig {
+    /// Whether this is an SSE (HTTP) or stdio (subprocess) server.
+    pub fn is_sse(&self) -> bool {
+        self.url.is_some()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

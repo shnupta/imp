@@ -16,6 +16,7 @@ mod context;
 mod db;
 mod error;
 mod project;
+mod subagent;
 mod tools;
 mod usage;
 

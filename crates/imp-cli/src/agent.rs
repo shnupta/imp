@@ -5,6 +5,7 @@ use crate::context::ContextManager;
 use crate::db::Database;
 use crate::error::{ImpError, Result};
 use crate::project::{self, ProjectInfo, ProjectRegistry};
+use crate::subagent::{SubAgent, SubAgentHandle, SubAgentResult};
 use crate::tools::ToolRegistry;
 use crate::usage::UsageTracker;
 use chrono::Local;
@@ -26,6 +27,8 @@ pub struct Agent {
     usage: UsageTracker,
     db: Database,
     session_id: String,
+    /// Handles for spawned sub-agents running as background tokio tasks.
+    sub_agents: Vec<SubAgentHandle>,
 }
 
 impl Agent {
@@ -77,6 +80,7 @@ impl Agent {
             usage: UsageTracker::new(),
             db,
             session_id,
+            sub_agents: Vec::new(),
         })
     }
 
@@ -102,12 +106,34 @@ impl Agent {
     }
 
     async fn process_message_with_options(&mut self, user_message: &str, stream: bool, render_markdown: bool) -> Result<String> {
-        self.messages.push(Message::text("user", user_message));
+        // Before processing, check if any sub-agents have completed and enrich the message
+        let completed = self.collect_completed_subagents().await;
+        let effective_message = if !completed.is_empty() {
+            let results_text = completed
+                .iter()
+                .map(|r| r.format_report())
+                .collect::<Vec<_>>()
+                .join("\n---\n");
+            eprintln!(
+                "{}",
+                style(format!("📬 {} sub-agent(s) completed", completed.len())).yellow()
+            );
+            format!(
+                "[Sub-agent results — {} task(s) completed]\n\n{}\n\n---\n\n{}",
+                completed.len(),
+                results_text,
+                user_message
+            )
+        } else {
+            user_message.to_string()
+        };
+
+        self.messages.push(Message::text("user", &effective_message));
         // Persist user message
         let _ = self.db.save_message(
             &self.session_id,
             "user",
-            &serde_json::Value::String(user_message.to_string()),
+            &serde_json::Value::String(effective_message.clone()),
             0,
         );
 
@@ -180,14 +206,24 @@ impl Agent {
                     style(format_tool_call(&tool_call.name, &tool_call.input)).dim()
                 );
 
-                let result = self
-                    .tools
-                    .execute_tool(&crate::tools::ToolCall {
-                        id: tool_call.id.clone(),
-                        name: tool_call.name.clone(),
-                        arguments: tool_call.input.clone(),
-                    })
-                    .await?;
+                // Intercept agent management tools — they need Agent state
+                let result = match tool_call.name.as_str() {
+                    "spawn_agent" => self.handle_spawn_agent(&tool_call),
+                    "check_agents" => {
+                        let mut r = self.handle_check_agents().await;
+                        r.tool_use_id = tool_call.id.clone();
+                        r
+                    }
+                    _ => {
+                        self.tools
+                            .execute_tool(&crate::tools::ToolCall {
+                                id: tool_call.id.clone(),
+                                name: tool_call.name.clone(),
+                                arguments: tool_call.input.clone(),
+                            })
+                            .await?
+                    }
+                };
 
                 // Convert to proper ToolResult format for Anthropic
                 let anthropic_result = crate::client::ToolResult {
@@ -197,7 +233,7 @@ impl Agent {
                     } else {
                         result.content
                     },
-                    is_error: result.error.is_some().then(|| true),
+                    is_error: result.error.is_some().then_some(true),
                 };
 
                 tool_results.push(anthropic_result);
@@ -295,6 +331,152 @@ impl Agent {
             .and_then(|mut f| f.write_all(entry.as_bytes()));
     }
 
+    // ── Sub-agent management ─────────────────────────────────────────
+
+    /// Handle the `spawn_agent` tool call: spawn a sub-agent and return immediately.
+    fn handle_spawn_agent(&mut self, tool_call: &crate::client::ToolCall) -> crate::tools::ToolResult {
+        let task = match tool_call.input.get("task").and_then(|v| v.as_str()) {
+            Some(t) => t.to_string(),
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    content: String::new(),
+                    error: Some("Missing required 'task' parameter".to_string()),
+                };
+            }
+        };
+
+        let max_tokens = tool_call
+            .input
+            .get("max_tokens_budget")
+            .and_then(|v| v.as_u64());
+
+        let working_dir = tool_call
+            .input
+            .get("working_directory")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let subagent = SubAgent::new(task, working_dir, max_tokens, self.config.clone());
+        let handle = subagent.spawn();
+
+        let id = handle.id;
+        let task_preview = if handle.task.len() > 100 {
+            format!("{}...", &handle.task[..100])
+        } else {
+            handle.task.clone()
+        };
+
+        eprintln!(
+            "{}",
+            style(format!("🚀 Sub-agent #{} spawned", id)).yellow()
+        );
+
+        self.sub_agents.push(handle);
+
+        crate::tools::ToolResult {
+            tool_use_id: tool_call.id.clone(),
+            content: format!(
+                "Sub-agent #{} spawned for: {}\nUse check_agents to monitor progress and get results.",
+                id, task_preview
+            ),
+            error: None,
+        }
+    }
+
+    /// Handle the `check_agents` tool call: report on sub-agent status and collect results.
+    async fn handle_check_agents(&mut self) -> crate::tools::ToolResult {
+        // Dummy tool_use_id — will be overwritten by caller, but we need a placeholder
+        // Actually the caller passes the real id. Let me return content only.
+        let completed = self.collect_completed_subagents().await;
+        let running_count = self.sub_agents.len();
+
+        let mut output = String::new();
+
+        if completed.is_empty() && running_count == 0 {
+            output.push_str("No sub-agents (active or completed).");
+        } else {
+            if !completed.is_empty() {
+                output.push_str(&format!(
+                    "=== {} Completed Sub-Agent(s) ===\n\n",
+                    completed.len()
+                ));
+                for result in &completed {
+                    output.push_str(&result.format_report());
+                    output.push_str("\n---\n");
+                }
+            }
+
+            if running_count > 0 {
+                output.push_str(&format!(
+                    "\n=== {} Active Sub-Agent(s) ===\n",
+                    running_count
+                ));
+                for handle in &self.sub_agents {
+                    let elapsed = handle.spawned_at.elapsed().as_secs();
+                    let task_preview = if handle.task.len() > 80 {
+                        format!("{}...", &handle.task[..80])
+                    } else {
+                        handle.task.clone()
+                    };
+                    output.push_str(&format!(
+                        "  #{} — running for {}s — {}\n",
+                        handle.id, elapsed, task_preview
+                    ));
+                }
+            }
+        }
+
+        // Note: tool_use_id is set to empty here; the caller in process_message_with_options
+        // uses the actual tool_call.id when building the Anthropic result. But since we
+        // return from match, let's just set it properly.
+        crate::tools::ToolResult {
+            // This will be replaced by the anthropic_result conversion which uses result.tool_use_id
+            tool_use_id: String::new(),
+            content: output,
+            error: None,
+        }
+    }
+
+    /// Collect results from all finished sub-agents, removing them from the tracking list.
+    async fn collect_completed_subagents(&mut self) -> Vec<SubAgentResult> {
+        let mut completed = Vec::new();
+        let mut remaining = Vec::new();
+
+        for handle in self.sub_agents.drain(..) {
+            if handle.handle.is_finished() {
+                match handle.handle.await {
+                    Ok(result) => completed.push(result),
+                    Err(e) => completed.push(SubAgentResult {
+                        id: handle.id,
+                        task: handle.task,
+                        summary: String::new(),
+                        files_changed: Vec::new(),
+                        input_tokens_used: 0,
+                        output_tokens_used: 0,
+                        success: false,
+                        error: Some(format!("Sub-agent task panicked: {}", e)),
+                    }),
+                }
+            } else {
+                remaining.push(handle);
+            }
+        }
+
+        self.sub_agents = remaining;
+        completed
+    }
+
+    /// Abort all running sub-agents. Called when the chat session ends.
+    /// Returns the number of sub-agents that were still running.
+    pub fn abort_subagents(&mut self) -> usize {
+        let count = self.sub_agents.len();
+        for handle in self.sub_agents.drain(..) {
+            handle.handle.abort();
+        }
+        count
+    }
+
     /// Write a session summary to the daily memory file. Called when the chat ends.
     pub fn write_session_summary(&self) {
         let home = match imp_home() {
@@ -349,7 +531,13 @@ fn format_tool_call(name: &str, input: &serde_json::Value) -> String {
             serde_json::Value::String(s) => {
                 let len = s.len();
                 if len > 100 {
-                    format!("({len} chars)")
+                    // Show a preview of the string, then the total length
+                    let preview = &s[..60.min(s.len())];
+                    // Cut at last whitespace for cleaner preview
+                    let cut = preview.rfind(char::is_whitespace)
+                        .filter(|&pos| pos > 20)
+                        .unwrap_or(preview.len());
+                    format!("\"{}…\" ({len} chars)", &s[..cut])
                 } else {
                     format!("\"{}\"", s)
                 }

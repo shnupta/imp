@@ -93,7 +93,26 @@ impl ToolRegistry {
     }
 
     fn load_builtin_tools(&mut self) {
-        // Add builtin tools
+        // Add builtin tools (including agent management tools)
+        let builtins = vec![
+            self.create_exec_tool(),
+            self.create_file_read_tool(),
+            self.create_file_write_tool(),
+            self.create_file_edit_tool(),
+            self.create_search_code_tool(),
+            self.create_list_files_tool(),
+            self.create_spawn_agent_tool(),
+            self.create_check_agents_tool(),
+        ];
+
+        for tool in builtins {
+            self.tools.insert(tool.tool.name.clone(), tool);
+        }
+    }
+
+    /// Load only the core builtin tools (no spawn_agent / check_agents).
+    /// Used by sub-agents to prevent recursive spawning.
+    pub fn load_subagent_builtins(&mut self) {
         let builtins = vec![
             self.create_exec_tool(),
             self.create_file_read_tool(),
@@ -376,6 +395,57 @@ impl ToolRegistry {
                     });
                     params
                 },
+            },
+            handler: ToolHandler {
+                kind: "builtin".to_string(),
+                command: None,
+                script: None,
+            },
+        }
+    }
+
+    fn create_spawn_agent_tool(&self) -> ToolDefinition {
+        ToolDefinition {
+            tool: ToolMeta {
+                name: "spawn_agent".to_string(),
+                description: "Spawn a sub-agent to work on a task in parallel. The sub-agent gets its own conversation context and tools. Use for tasks that can be done independently while you continue the conversation. The sub-agent runs in the background and results are returned when complete.".to_string(),
+                parameters: {
+                    let mut params = HashMap::new();
+                    params.insert("task".to_string(), ParameterDef {
+                        param_type: "string".to_string(),
+                        required: true,
+                        default: None,
+                        description: Some("Clear, complete description of what the sub-agent should do. Include ALL context needed — sub-agents cannot ask clarifying questions.".to_string()),
+                    });
+                    params.insert("max_tokens_budget".to_string(), ParameterDef {
+                        param_type: "integer".to_string(),
+                        required: false,
+                        default: Some(Value::Number(serde_json::Number::from(50000))),
+                        description: Some("Maximum token budget for this sub-agent (default: 50000). Prevents runaway costs.".to_string()),
+                    });
+                    params.insert("working_directory".to_string(), ParameterDef {
+                        param_type: "string".to_string(),
+                        required: false,
+                        default: None,
+                        description: Some("Working directory for the sub-agent's shell commands. Defaults to current directory.".to_string()),
+                    });
+                    params
+                },
+            },
+            handler: ToolHandler {
+                kind: "builtin".to_string(),
+                command: None,
+                script: None,
+            },
+        }
+    }
+
+    fn create_check_agents_tool(&self) -> ToolDefinition {
+        ToolDefinition {
+            tool: ToolMeta {
+                name: "check_agents".to_string(),
+                description: "Check on spawned sub-agents. Lists active sub-agents and their status, and returns results from any that have completed.".to_string(),
+                parameters: HashMap::new(),
             },
             handler: ToolHandler {
                 kind: "builtin".to_string(),

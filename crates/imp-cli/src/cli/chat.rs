@@ -82,6 +82,13 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
 
         match input.to_lowercase().as_str() {
             "quit" | "exit" | "bye" | "q" => {
+                let aborted = agent.abort_subagents();
+                if aborted > 0 {
+                    println!(
+                        "{}",
+                        style(format!("⚠️  Aborted {} running sub-agent(s)", aborted)).yellow()
+                    );
+                }
                 agent.write_session_summary();
                 println!("{}", style(agent.usage().format_session_total()).dim());
                 println!("👋 Goodbye!");

@@ -11,6 +11,14 @@ pub async fn execute_builtin(tool_name: &str, arguments: &Value) -> Result<Strin
         "file_edit" => file_edit(arguments).await,
         "search_code" => search_code(arguments).await,
         "list_files" => list_files(arguments).await,
+        // spawn_agent and check_agents are intercepted by Agent before reaching here.
+        // If they somehow arrive, return an informative error.
+        "spawn_agent" | "check_agents" => {
+            Err(ImpError::Tool(format!(
+                "'{}' must be handled by the Agent, not the builtin executor",
+                tool_name
+            )))
+        }
         _ => Err(ImpError::Tool(format!("Unknown builtin tool: {}", tool_name))),
     }
 }

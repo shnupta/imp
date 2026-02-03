@@ -173,6 +173,33 @@ pub async fn run() -> Result<()> {
         println!("in {} at any time.", home.display());
     }
 
+    // ── 5. Daily Reflection Cron ────────────────────────────────────
+    println!(
+        "\n{}",
+        style("5. Daily Reflection (recommended)").bold()
+    );
+    println!("Imp can automatically reflect on each day's interactions and distill");
+    println!("insights into long-term memory. This runs 'imp reflect' via cron.\n");
+
+    let setup_cron = Confirm::new()
+        .with_prompt("Set up daily reflection? (runs at 11:55 PM)")
+        .default(true)
+        .interact()?;
+
+    if setup_cron {
+        match setup_reflection_cron() {
+            Ok(()) => println!("  ✅ Daily reflection cron job installed"),
+            Err(e) => println!(
+                "  {} Failed to set up cron: {}. You can add it manually:\n    {}",
+                style("⚠️").yellow(),
+                e,
+                style("(crontab -l; echo '55 23 * * * imp reflect') | crontab -").dim()
+            ),
+        }
+    } else {
+        println!("Skipped. You can run {} manually or add a cron job later.", style("imp reflect").cyan());
+    }
+
     // ── Done ─────────────────────────────────────────────────────────
     println!("\n{}", style("🎉 Setup Complete!").bold().green());
     println!(
@@ -193,6 +220,53 @@ pub async fn run() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Install a cron job that runs `imp reflect` daily at 23:55.
+fn setup_reflection_cron() -> std::result::Result<(), String> {
+    use std::process::Command;
+
+    let cron_line = "55 23 * * * imp reflect 2>/dev/null";
+
+    // Read existing crontab (ignore error if empty)
+    let existing = Command::new("crontab")
+        .arg("-l")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    // Don't duplicate if already present
+    if existing.contains("imp reflect") {
+        return Ok(());
+    }
+
+    // Append our line
+    let new_crontab = if existing.trim().is_empty() {
+        format!("{}\n", cron_line)
+    } else {
+        format!("{}\n{}\n", existing.trim(), cron_line)
+    };
+
+    // Write via pipe to crontab
+    let mut child = Command::new("crontab")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn crontab: {}", e))?;
+
+    if let Some(ref mut stdin) = child.stdin {
+        use std::io::Write;
+        stdin
+            .write_all(new_crontab.as_bytes())
+            .map_err(|e| format!("failed to write crontab: {}", e))?;
+    }
+
+    let status = child.wait().map_err(|e| format!("crontab failed: {}", e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("crontab returned non-zero exit code".to_string())
+    }
 }
 
 

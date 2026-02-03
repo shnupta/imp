@@ -46,9 +46,13 @@ enum Commands {
     },
     /// Start an interactive chat session
     Chat {
-        /// Resume the latest session (for the current project)
-        #[arg(long)]
+        /// Show session picker to resume a previous session
+        #[arg(long, short)]
         resume: bool,
+
+        /// Continue the most recent session (for the current project)
+        #[arg(long, short = 'c')]
+        r#continue: bool,
 
         /// Resume a specific session by ID (full or prefix)
         #[arg(long)]
@@ -97,8 +101,8 @@ async fn main() -> Result<()> {
             let full_message = message.join(" ");
             oneshot::run(&full_message).await?;
         }
-        Commands::Chat { resume, session } => {
-            chat::run(resume, session).await?;
+        Commands::Chat { resume, r#continue, session } => {
+            chat::run(resume, r#continue, session).await?;
         }
         Commands::Learn => {
             learn::run().await?;

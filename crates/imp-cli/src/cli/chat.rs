@@ -4,24 +4,25 @@ use console::style;
 use dialoguer::Select;
 use std::io::{self, Write};
 
-pub async fn run(resume: bool, session: Option<String>) -> Result<()> {
+pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> Result<()> {
     let mut agent = Agent::new().await?;
 
-    // Handle --session <id> or --resume (latest)
+    // --session <id>: resume a specific session
     if let Some(ref sid) = session {
         agent.resume(sid)?;
         println!(
             "{}",
             style(format!("🔄 Resumed session: {}", &sid[..sid.len().min(8)])).yellow()
         );
-    } else if resume {
+    // --continue: auto-resume the most recent session for this project
+    } else if continue_last {
         let project = agent.project_name().map(|s| s.to_string());
         if let Some(info) = agent.db().get_latest_session(project.as_deref())? {
             agent.resume(&info.id)?;
             println!(
                 "{}",
                 style(format!(
-                    "🔄 Resumed session: {} ({} messages)",
+                    "🔄 Continued session: {} ({} messages)",
                     &info.id[..info.id.len().min(8)],
                     info.message_count
                 ))
@@ -30,10 +31,11 @@ pub async fn run(resume: bool, session: Option<String>) -> Result<()> {
         } else {
             println!("{}", style("No previous session found — starting fresh.").dim());
         }
-    } else {
-        // No flags — offer interactive session picker if previous sessions exist
+    // --resume: show interactive session picker
+    } else if resume {
         maybe_show_session_picker(&mut agent)?;
     }
+    // bare `imp chat`: start fresh (no picker)
 
     println!(
         "{}",

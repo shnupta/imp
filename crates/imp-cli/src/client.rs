@@ -1,6 +1,6 @@
 use crate::config::{AuthMethod, Config};
+use crate::claude_code;
 use crate::error::{ImpError, Result};
-use anthropic_auth::{AsyncOAuthClient, OAuthConfig as AuthOAuthConfig};
 use futures::stream::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -76,7 +76,6 @@ pub struct ClaudeClient {
     model: String,
     base_url: String,
     config: Config,
-    oauth_client: Option<AsyncOAuthClient>,
 }
 
 impl ClaudeClient {
@@ -86,20 +85,11 @@ impl ClaudeClient {
             .build()
             .unwrap();
 
-        // Initialize OAuth client if using OAuth
-        let oauth_client = if config.auth_method() == &AuthMethod::OAuth {
-            Some(AsyncOAuthClient::new(AuthOAuthConfig::default())
-                .map_err(|e| ImpError::Config(format!("Failed to initialize OAuth client: {}", e)))?)
-        } else {
-            None
-        };
-
         Ok(Self {
             client,
             model: config.llm.model.clone(),
             base_url: "https://api.anthropic.com".to_string(),
             config,
-            oauth_client,
         })
     }
 
@@ -115,22 +105,16 @@ impl ClaudeClient {
 
     /// Refresh the OAuth access token
     async fn refresh_oauth_token(&mut self) -> Result<()> {
-        let oauth_client = self.oauth_client.as_ref()
-            .ok_or_else(|| ImpError::Config("OAuth client not initialized".to_string()))?;
-
         let oauth_config = self.config.oauth_config()
             .ok_or_else(|| ImpError::Config("OAuth configuration missing".to_string()))?;
 
-        let new_tokens = oauth_client
-            .refresh_token(&oauth_config.refresh_token)
-            .await
-            .map_err(|e| ImpError::Agent(format!("Failed to refresh OAuth token: {}", e)))?;
+        let new_tokens = claude_code::refresh_oauth_tokens(&oauth_config.refresh_token).await?;
 
         // Update config with new tokens
         self.config.update_oauth_tokens(
             new_tokens.access_token,
             new_tokens.refresh_token,
-            new_tokens.expires_at as i64,
+            new_tokens.expires_at,
         )?;
 
         Ok(())

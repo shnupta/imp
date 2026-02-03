@@ -17,7 +17,7 @@ Imp is an AI agent that acts as both a **coding partner** and **work organizer**
 
 - Rust (install from [rustup.rs](https://rustup.rs/))
 - **Authentication** (choose one):
-  - **OAuth**: Claude Pro or Max subscription (recommended)
+  - **Claude Code OAuth**: If you have Claude Code installed and authenticated (automatically detected)
   - **API Key**: Anthropic API key from [console.anthropic.com](https://console.anthropic.com/)
 - Optional: `ripgrep` for better code search (install via your package manager or [GitHub](https://github.com/BurntSushi/ripgrep))
 
@@ -41,23 +41,31 @@ After installation, `imp` will be available from anywhere in your terminal.
 
 ## Authentication
 
-Imp supports two authentication methods:
+Imp supports multiple authentication methods:
 
-### OAuth (Recommended)
-If you have a Claude Pro or Max subscription, use OAuth to authenticate directly with your existing account:
+### Claude Code Integration (Recommended)
+If you have [Claude Code](https://claude.ai/code) installed and authenticated, imp will automatically detect and import your existing OAuth credentials:
 
 ```bash
-imp bootstrap  # Choose OAuth during setup
+imp bootstrap  # Automatically detects Claude Code credentials
 # or
-imp login      # Switch to OAuth later
+imp login      # Import Claude Code credentials later
 ```
+
+This uses your Claude Pro/Max subscription through the same OAuth tokens that Claude Code uses.
 
 ### API Key
 Use your Anthropic API key for pay-per-token usage:
 
 ```bash
-imp bootstrap  # Choose API Key during setup
+imp bootstrap  # Choose API Key if Claude Code not found
+# or provide API key manually
 ```
+
+### How it works
+1. **First choice**: If `~/.claude/.credentials.json` exists (Claude Code), imp offers to import those OAuth tokens
+2. **Fallback**: If no Claude Code credentials found, imp prompts for an API key
+3. **Manual switching**: Use `imp login` anytime to change authentication methods
 
 ## First-time Setup
 
@@ -163,7 +171,10 @@ method = "api_key"
 key = "sk-ant-..."
 ```
 
-**Note**: OAuth tokens are automatically refreshed when they expire. API keys don't expire but bill per usage.
+**Note**: 
+- OAuth tokens (from Claude Code) are automatically refreshed when they expire
+- API keys don't expire but bill per usage
+- Claude Code credentials are imported from `~/.claude/.credentials.json`
 
 ## Examples
 

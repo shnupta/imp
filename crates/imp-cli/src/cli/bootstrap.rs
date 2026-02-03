@@ -1,6 +1,6 @@
 use crate::config::{imp_home, AuthConfig, AuthMethod, ApiKeyConfig, Config, LlmConfig, OAuthConfig};
+use crate::claude_code;
 use crate::error::Result;
-use anthropic_auth::{AsyncOAuthClient, OAuthConfig as AuthOAuthConfig, OAuthMode, open_browser};
 use console::style;
 use dialoguer::{Confirm, Input, Password};
 use std::fs;
@@ -30,33 +30,37 @@ pub async fn run() -> Result<()> {
 
     // ── 1. Authentication Method ─────────────────────────────────────
     println!("{}", style("1. Authentication Method").bold());
-    println!("Choose how you want to authenticate with Anthropic:\n");
     
-    let auth_methods = vec![
-        "OAuth (Claude Pro/Max subscription) - Recommended",
-        "API Key (Pay-per-token)",
-    ];
-
-    let auth_choice = dialoguer::Select::new()
-        .with_prompt("Select authentication method")
-        .items(&auth_methods)
-        .default(0)
-        .interact()?;
-
-    let (auth_method, oauth_config, api_key) = if auth_choice == 0 {
-        // OAuth flow
-        println!("\n{}", style("Setting up OAuth authentication...").cyan());
-        println!("This will use your Claude Pro/Max subscription.\n");
+    // Check for Claude Code credentials first
+    let (auth_method, oauth_config, api_key) = if claude_code::claude_code_credentials_exist() {
+        println!("{}", style("Found Claude Code credentials!").green());
+        println!("We found existing Claude Code OAuth credentials on your system.\n");
         
-        let oauth_config = setup_oauth_auth().await?;
-        (crate::config::AuthMethod::OAuth, Some(oauth_config), None)
+        let use_claude_code = Confirm::new()
+            .with_prompt("Use your existing Claude Code OAuth login?")
+            .default(true)
+            .interact()?;
+
+        if use_claude_code {
+            match claude_code::read_claude_code_credentials() {
+                Ok(credentials) => {
+                    let oauth_config = claude_code::to_oauth_config(&credentials);
+                    println!("✅ Imported Claude Code OAuth credentials");
+                    (AuthMethod::OAuth, Some(oauth_config), None)
+                }
+                Err(e) => {
+                    println!("{}", style(format!("❌ Failed to read Claude Code credentials: {}", e)).red());
+                    println!("Falling back to manual authentication setup.\n");
+                    setup_manual_auth().await?
+                }
+            }
+        } else {
+            setup_manual_auth().await?
+        }
     } else {
-        // API Key flow  
-        println!("\n{}", style("Setting up API key authentication...").cyan());
-        println!("You need an Anthropic API key. Get one at: https://console.anthropic.com/\n");
-        
-        let api_key = setup_api_key_auth()?;
-        (crate::config::AuthMethod::ApiKey, None, Some(api_key))
+        println!("No Claude Code credentials found.");
+        println!("Choose how you want to authenticate with Anthropic:\n");
+        setup_manual_auth().await?
     };
 
     // ── 2. Agent Identity ────────────────────────────────────────────
@@ -220,55 +224,34 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-async fn setup_oauth_auth() -> Result<OAuthConfig> {
-    let oauth_client = AsyncOAuthClient::new(AuthOAuthConfig::default())
-        .map_err(|e| crate::error::ImpError::Config(format!("Failed to initialize OAuth client: {}", e)))?;
+async fn setup_manual_auth() -> Result<(AuthMethod, Option<OAuthConfig>, Option<String>)> {
+    let auth_methods = vec![
+        "API Key (Pay-per-token) - Recommended for new users",
+        "OAuth (Claude Pro/Max subscription) - Not currently supported",
+    ];
 
-    let flow = oauth_client.start_flow(OAuthMode::Max)
-        .map_err(|e| crate::error::ImpError::Config(format!("Failed to start OAuth flow: {}", e)))?;
+    let auth_choice = dialoguer::Select::new()
+        .with_prompt("Select authentication method")
+        .items(&auth_methods)
+        .default(0)
+        .interact()?;
 
-    println!("Opening your browser to authenticate with Claude...");
-    
-    // Attempt to open browser
-    if let Err(_) = open_browser(&flow.authorization_url) {
-        println!("{}", style("⚠️  Could not open browser automatically").yellow());
-        println!("Please manually visit: {}", flow.authorization_url);
+    if auth_choice == 0 {
+        // API Key flow  
+        println!("\n{}", style("Setting up API key authentication...").cyan());
+        println!("You need an Anthropic API key. Get one at: https://console.anthropic.com/\n");
+        
+        let api_key = setup_api_key_auth()?;
+        Ok((AuthMethod::ApiKey, None, Some(api_key)))
     } else {
-        println!("✅ Opened browser");
+        // OAuth not currently supported through manual flow
+        println!("\n{}", style("OAuth authentication is currently only supported through Claude Code import.").yellow());
+        println!("Install Claude Code from https://claude.ai/code to use OAuth, then run 'imp bootstrap' again.\n");
+        println!("Falling back to API key authentication...");
+        
+        let api_key = setup_api_key_auth()?;
+        Ok((AuthMethod::ApiKey, None, Some(api_key)))
     }
-    
-    println!("\nAfter authorizing, you'll be redirected to a page that may show an error.");
-    println!("That's normal! Look at the URL bar and copy the part after 'code='");
-    println!("Example: if the URL is 'http://localhost:8080/?code=abc123#state456'");
-    println!("Copy: 'abc123#state456'");
-    
-    let auth_response: String = loop {
-        let response = Input::<String>::new()
-            .with_prompt("Paste the authorization response (code#state)")
-            .interact()?;
-        
-        if response.trim().is_empty() {
-            println!("{}", style("❌ Response cannot be empty").red());
-            continue;
-        }
-        
-        break response;
-    };
-
-    println!("Exchanging code for tokens...");
-    
-    let tokens = oauth_client
-        .exchange_code(&auth_response, &flow.state, &flow.verifier)
-        .await
-        .map_err(|e| crate::error::ImpError::Agent(format!("Failed to exchange authorization code: {}", e)))?;
-
-    println!("✅ Successfully obtained access tokens!");
-
-    Ok(OAuthConfig {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        expires_at: tokens.expires_at as i64,
-    })
 }
 
 fn setup_api_key_auth() -> Result<String> {

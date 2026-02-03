@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod agent;
+mod claude_code;
 mod cli;
 mod client;
 mod config;

@@ -1,6 +1,6 @@
 use crate::error::{ImpError, Result};
 use futures::stream::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -101,8 +101,8 @@ impl ClaudeClient {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", self.api_key))?,
+            "x-api-key",
+            HeaderValue::from_str(&self.api_key)?,
         );
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
 

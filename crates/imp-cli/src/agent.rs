@@ -51,10 +51,14 @@ pub struct Agent {
 
 impl Agent {
     /// Render markdown text to a string for emission through the printer.
-    /// Prose goes through termimad; code blocks are rendered directly with
-    /// syntect highlighting and a full-width background rectangle.
-    fn render_markdown_to_string(text: &str) -> String {
-        highlight::render_markdown(text)
+    /// Code blocks with language tags get syntax highlighting via syntect.
+    fn render_markdown_to_string(text: &str, theme: &str) -> String {
+        if text.trim().is_empty() {
+            return String::new();
+        }
+        let highlighted = highlight::highlight_code_blocks(text, theme);
+        let skin = termimad::MadSkin::default();
+        format!("{}", skin.term_text(&highlighted))
     }
 
     /// Emit a line of output through the ExternalPrinter (readline-safe) if
@@ -245,7 +249,7 @@ impl Agent {
 
             if tool_calls.is_empty() {
                 if render_markdown && !stream {
-                    let rendered = Self::render_markdown_to_string(&text_content);
+                    let rendered = Self::render_markdown_to_string(&text_content, &self.config.display.theme);
                     if !rendered.is_empty() {
                         self.emit(rendered.trim_end());
                     }

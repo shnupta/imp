@@ -120,6 +120,7 @@ pub async fn run() -> Result<()> {
         },
         auth: AuthConfig::default(),
         thinking: Default::default(),
+        display: Default::default(),
         mcp: Default::default(),
     };
     

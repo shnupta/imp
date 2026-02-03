@@ -68,6 +68,8 @@ enum Commands {
         #[arg(short, long)]
         date: Option<String>,
     },
+    /// List available syntax highlighting themes
+    Themes,
     /// Manage projects
     Project {
         #[command(subcommand)]
@@ -111,6 +113,15 @@ async fn main() -> Result<()> {
         }
         Commands::Reflect { date } => {
             reflect::run(date).await?;
+        }
+        Commands::Themes => {
+            let mut themes = highlight::available_themes();
+            themes.sort();
+            println!("Available syntax highlighting themes:\n");
+            for theme in &themes {
+                println!("  {}", theme);
+            }
+            println!("\nSet in config.toml:\n\n  [display]\n  theme = \"{}\"", themes.first().unwrap_or(&"base16-ocean.dark".to_string()));
         }
         Commands::Project { command } => match command {
             ProjectCommands::List => {

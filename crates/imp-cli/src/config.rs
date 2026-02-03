@@ -10,6 +10,8 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub thinking: ThinkingConfig,
+    #[serde(default)]
+    pub display: DisplayConfig,
     /// MCP server configurations. Key is the server name.
     #[serde(default)]
     pub mcp: std::collections::HashMap<String, McpServerConfig>,
@@ -56,6 +58,26 @@ pub struct LlmConfig {
     /// Legacy API key field - still supported for backward compatibility
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DisplayConfig {
+    /// Syntect theme for code block highlighting.
+    /// Run `imp themes` to list available themes.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+        }
+    }
+}
+
+fn default_theme() -> String {
+    "base16-ocean.dark".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]

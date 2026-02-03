@@ -86,7 +86,7 @@ impl ClaudeClient {
         Self {
             client,
             api_key,
-            model: model.unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string()),
+            model: model.unwrap_or_else(|| "claude-opus-4-5-20250514".to_string()),
             base_url: "https://api.anthropic.com".to_string(),
         }
     }

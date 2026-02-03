@@ -48,6 +48,13 @@
 - Calendar/reminder integration (beyond basic cron)
 - Goal: Imp goes from "tool you invoke" to "teammate who's paying attention"
 
+### Channel Integrations
+- Telegram, Slack, Discord — chat with Imp from anywhere
+- Each channel is an input/output surface connected to the daemon
+- Supports notifications (CI failed, reminder, proactive insight)
+- Could leverage MCP for some integrations, or native adapters
+- Depends on: daemon
+
 ### Web UI
 - Browser-based chat interface (alternative to terminal)
 - Real-time streaming responses

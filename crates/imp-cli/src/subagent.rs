@@ -204,6 +204,7 @@ impl SubAgent {
         let mut final_text = String::new();
 
         let max_iterations = 25;
+        let system_tokens_estimate = system_prompt.len() / 4;
 
         for _iteration in 0..max_iterations {
             // Check token budget before each API call
@@ -214,6 +215,21 @@ impl SubAgent {
                     self.max_tokens_budget
                 );
                 break;
+            }
+
+            // Compact conversation if it's getting large — sub-agents are aggressive
+            // about this since they have a fixed token budget
+            messages = crate::compaction::compact_if_needed(&messages, system_tokens_estimate);
+
+            // Also truncate large tool results that the model has already seen.
+            // After compaction keeps recent messages, old tool results in those
+            // messages are still huge. Shrink any tool_result content > 2000 chars
+            // that isn't in the last 4 messages.
+            if messages.len() > 4 {
+                let truncate_up_to = messages.len() - 4;
+                for msg in &mut messages[..truncate_up_to] {
+                    truncate_tool_results(&mut msg.content);
+                }
             }
 
             let tool_schemas = Some(tools.get_tool_schemas());
@@ -334,5 +350,37 @@ fn extract_summary(text: &str) -> String {
         format!("{}...", preview)
     } else {
         text.to_string()
+    }
+}
+
+/// Truncate large tool_result content blocks in a message to save context space.
+/// This modifies the message content in-place: any tool_result with content > 2000 chars
+/// gets replaced with a truncated version + note.
+fn truncate_tool_results(content: &mut serde_json::Value) {
+    const MAX_TOOL_RESULT_CHARS: usize = 2000;
+
+    if let serde_json::Value::Array(blocks) = content {
+        for block in blocks.iter_mut() {
+            let is_tool_result = block
+                .get("type")
+                .and_then(|t| t.as_str())
+                .map_or(false, |t| t == "tool_result");
+
+            if !is_tool_result {
+                continue;
+            }
+
+            // Tool result content can be a string or nested
+            if let Some(text) = block.get("content").and_then(|c| c.as_str()) {
+                if text.len() > MAX_TOOL_RESULT_CHARS {
+                    let preview: String = text.chars().take(MAX_TOOL_RESULT_CHARS).collect();
+                    block["content"] = serde_json::Value::String(format!(
+                        "{}… [truncated — {} chars total, use file_read with offset/limit to re-read specific sections]",
+                        preview,
+                        text.len()
+                    ));
+                }
+            }
+        }
     }
 }

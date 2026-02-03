@@ -67,50 +67,32 @@ pub async fn run() -> Result<()> {
     };
 
     // ── 2. Agent Identity ────────────────────────────────────────────
-    println!("\n{}", style("2. Agent Identity").bold());
+    println!("\n{}", style("2. Your Agent").bold());
 
     let agent_name: String = Input::new()
-        .with_prompt("What do you want to name your agent?")
+        .with_prompt("Name your agent")
         .default("Imp".to_string())
         .interact()?;
 
+    println!("\n  Describe how your agent should act.");
+    println!("  {}", style("e.g. strengths, focuses, communication style, personality").dim());
     let persona: String = Input::new()
-        .with_prompt("Brief personality/style (or press Enter for default)")
+        .with_prompt("Personality")
         .default(
-            "A helpful, direct AI assistant that learns and adapts over time.".to_string(),
+            "Direct and helpful. Learns and adapts over time.".to_string(),
         )
         .interact()?;
 
-    // ── 3. User Information ──────────────────────────────────────────
+    // ── 3. About You ─────────────────────────────────────────────────
     println!("\n{}", style("3. About You").bold());
-    println!("Help your agent understand who you are and how you work.\n");
-
-    let user_name: String = Input::new()
-        .with_prompt("What's your name?")
-        .interact()?;
-
-    let preferred_name: String = Input::new()
-        .with_prompt("What should your agent call you?")
-        .default(user_name.clone())
-        .interact()?;
-
-    let user_role: String = Input::new()
-        .with_prompt("What's your role? (e.g., Software Engineer, DevOps, Product Manager)")
-        .default("Software Engineer".to_string())
-        .interact()?;
-
-    let communication_style: String = Input::new()
-        .with_prompt("Communication preference")
-        .default("Direct and concise".to_string())
-        .interact()?;
-
-    let work_schedule: String = Input::new()
-        .with_prompt("Typical work hours (e.g., 9-5 EST, flexible)")
-        .default("9-5 local time".to_string())
+    println!("  Tell your agent a bit about yourself.");
+    println!("  {}", style("e.g. what you work on, what you care about, things you're responsible for").dim());
+    let about_user: String = Input::new()
+        .with_prompt("About you")
         .interact()?;
 
     // ── 4. Save config + core files ──────────────────────────────────
-    println!("\n{}", style("4. Saving Configuration").bold());
+    println!("\n{}", style("Saving configuration...").dim());
     fs::create_dir_all(&home)?;
     fs::create_dir_all(home.join("projects"))?;
     fs::create_dir_all(home.join("memory"))?;
@@ -145,19 +127,14 @@ pub async fn run() -> Result<()> {
 
     // USER.md
     let user_content = include_str!("../../../../templates/global/USER.md")
-        .replace("{{user_name}}", &user_name)
-        .replace("{{preferred_name}}", &preferred_name)
-        .replace("{{user_role}}", &user_role)
-        .replace("{{communication_style}}", &communication_style)
-        .replace("{{work_schedule}}", &work_schedule)
-        .replace("{{timezone}}", "Local timezone"); // TODO: could detect this automatically
+        .replace("{{about_user}}", &about_user);
     fs::write(home.join("USER.md"), user_content)?;
     println!("  ✅ USER.md");
 
-    // ── 5. Optional engineering context ──────────────────────────────
+    // ── 4. Optional engineering context ──────────────────────────────
     println!(
         "\n{}",
-        style("5. Engineering Context (optional)").bold()
+        style("4. Engineering Context (optional)").bold()
     );
     println!("Engineering context files help your agent understand your tech stack,");
     println!("coding principles, and architecture across all projects.\n");

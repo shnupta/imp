@@ -77,7 +77,7 @@ impl Default for DisplayConfig {
 }
 
 fn default_theme() -> String {
-    "base16-ocean.dark".to_string()
+    "base16-mocha.dark".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]

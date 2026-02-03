@@ -32,26 +32,49 @@ pub async fn run(date: Option<String>) -> Result<()> {
     let soul_content =
         std::fs::read_to_string(home.join("SOUL.md")).unwrap_or_default();
 
+    // Load optional engineering context files
+    let stack_content = std::fs::read_to_string(home.join("STACK.md")).ok();
+    let arch_content = std::fs::read_to_string(home.join("ARCHITECTURE.md")).ok();
+    let principles_content = std::fs::read_to_string(home.join("PRINCIPLES.md")).ok();
+
     println!("🧠 Reflecting on {}...\n", target_date);
 
-    let system_prompt = "\
+    let has_engineering_files = stack_content.is_some() || arch_content.is_some() || principles_content.is_some();
+
+    let engineering_schema = if has_engineering_files {
+        "\n  \"stack_update\": null | \"<full updated STACK.md content>\",\
+        \n  \"architecture_update\": null | \"<full updated ARCHITECTURE.md content>\",\
+        \n  \"principles_update\": null | \"<full updated PRINCIPLES.md content>\","
+    } else {
+        ""
+    };
+
+    let engineering_rules = if has_engineering_files {
+        "\n- STACK.md updates: if new technologies, tools, or stack changes were discussed.\
+        \n- ARCHITECTURE.md updates: if architectural decisions, patterns, or system design evolved.\
+        \n- PRINCIPLES.md updates: if coding principles, conventions, or standards were established or changed."
+    } else {
+        ""
+    };
+
+    let system_prompt = format!("\
 You are a reflective memory system for a personal AI agent. You review a day's \
 interaction logs and decide what, if anything, should be persisted to long-term files.
 
-You will be given the day's notes plus the current contents of three files:
+You will be given the day's notes plus the current contents of the agent's core files:
 - MEMORY.md — long-term memory (facts, preferences, lessons, open threads)
 - USER.md — information about the human you serve
-- SOUL.md — your identity, personality, values
+- SOUL.md — your identity, personality, values{}
 
 Your job is to produce a JSON response with this exact structure:
 
 ```json
-{
+{{
   \"summary\": \"A 2-3 sentence summary of what happened today and what you learned.\",
   \"memory_update\": null | \"<full updated MEMORY.md content>\",
   \"user_update\": null | \"<full updated USER.md content>\",
-  \"soul_update\": null | \"<full updated SOUL.md content>\"
-}
+  \"soul_update\": null | \"<full updated SOUL.md content>\"{}
+}}
 ```
 
 Rules:
@@ -59,20 +82,41 @@ Rules:
 - Set a field to null if no meaningful update is needed. Do NOT rewrite a file just to rephrase things.
 - MEMORY.md updates: add genuine insights, preferences discovered, decisions made, lessons learned. Remove stale info. Ignore noise (tool counts, timestamps, routine operations).
 - USER.md updates: only if you learned something new about the human (new preferences, new context, corrected info). Don't add speculative info.
-- SOUL.md updates: only if your identity or values genuinely evolved (very rare). Not for minor style tweaks.
+- SOUL.md updates: only if your identity or values genuinely evolved (very rare). Not for minor style tweaks.{}
 - Be conservative — only update files when there's real new information.
 - When updating, return the COMPLETE file content (not a diff).
-- Return ONLY the JSON block, no other text."
-        .to_string();
+- Return ONLY the JSON block, no other text.",
+        if has_engineering_files {
+            "\n- STACK.md — tech stack, languages, frameworks, tools\n\
+             - ARCHITECTURE.md — system architecture, design patterns\n\
+             - PRINCIPLES.md — coding principles and conventions"
+        } else { "" },
+        engineering_schema,
+        engineering_rules
+    );
 
-    let user_message = format!(
+    let mut user_message = format!(
         "## Current MEMORY.md\n\n{}\n\n---\n\n\
          ## Current USER.md\n\n{}\n\n---\n\n\
-         ## Current SOUL.md\n\n{}\n\n---\n\n\
-         ## Today's Notes ({})\n\n{}\n\n---\n\n\
-         Reflect on today's interactions and produce the JSON response.",
-        memory_content, user_content, soul_content, target_date, daily_content
+         ## Current SOUL.md\n\n{}\n\n---\n\n",
+        memory_content, user_content, soul_content
     );
+
+    if let Some(ref content) = stack_content {
+        user_message.push_str(&format!("## Current STACK.md\n\n{}\n\n---\n\n", content));
+    }
+    if let Some(ref content) = arch_content {
+        user_message.push_str(&format!("## Current ARCHITECTURE.md\n\n{}\n\n---\n\n", content));
+    }
+    if let Some(ref content) = principles_content {
+        user_message.push_str(&format!("## Current PRINCIPLES.md\n\n{}\n\n---\n\n", content));
+    }
+
+    user_message.push_str(&format!(
+        "## Today's Notes ({})\n\n{}\n\n---\n\n\
+         Reflect on today's interactions and produce the JSON response.",
+        target_date, daily_content
+    ));
 
     let messages = vec![Message::text("user", &user_message)];
     let response = client
@@ -130,6 +174,42 @@ Rules:
             std::fs::write(home.join("SOUL.md"), content)?;
             println!("{}", style("  ✅ SOUL.md updated").green());
             updates += 1;
+        }
+    }
+
+    // STACK.md (only if it already exists)
+    if stack_content.is_some() {
+        if let Some(content) = parsed.get("stack_update").and_then(|v| v.as_str()) {
+            let content = content.trim();
+            if !content.is_empty() {
+                std::fs::write(home.join("STACK.md"), content)?;
+                println!("{}", style("  ✅ STACK.md updated").green());
+                updates += 1;
+            }
+        }
+    }
+
+    // ARCHITECTURE.md (only if it already exists)
+    if arch_content.is_some() {
+        if let Some(content) = parsed.get("architecture_update").and_then(|v| v.as_str()) {
+            let content = content.trim();
+            if !content.is_empty() {
+                std::fs::write(home.join("ARCHITECTURE.md"), content)?;
+                println!("{}", style("  ✅ ARCHITECTURE.md updated").green());
+                updates += 1;
+            }
+        }
+    }
+
+    // PRINCIPLES.md (only if it already exists)
+    if principles_content.is_some() {
+        if let Some(content) = parsed.get("principles_update").and_then(|v| v.as_str()) {
+            let content = content.trim();
+            if !content.is_empty() {
+                std::fs::write(home.join("PRINCIPLES.md"), content)?;
+                println!("{}", style("  ✅ PRINCIPLES.md updated").green());
+                updates += 1;
+            }
         }
     }
 

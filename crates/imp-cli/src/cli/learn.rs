@@ -11,11 +11,28 @@ pub async fn run() -> Result<()> {
     println!("{}", style("📚 Teaching Your Agent").bold().blue());
     println!("What would you like to teach me?\n");
 
-    let choices = vec![
+    let home = imp_home()?;
+
+    let mut choices = vec![
         "About yourself (personal context)",
         "About a project (current project context)",
         "General knowledge (long-term memory)",
     ];
+
+    // Add engineering context options if the files exist
+    let has_stack = home.join("STACK.md").exists();
+    let has_arch = home.join("ARCHITECTURE.md").exists();
+    let has_principles = home.join("PRINCIPLES.md").exists();
+
+    if has_stack {
+        choices.push("Tech stack (languages, frameworks, tools)");
+    }
+    if has_arch {
+        choices.push("Architecture (system design, patterns)");
+    }
+    if has_principles {
+        choices.push("Principles (coding conventions, standards)");
+    }
 
     let selection = Select::new()
         .with_prompt("What type of knowledge is this?")
@@ -42,10 +59,10 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
+    // Map selection index to file, accounting for dynamic menu items
     let (file_path, context_type) = match selection {
         0 => {
             // About yourself - update USER.md
-            let home = imp_home()?;
             (home.join("USER.md"), "personal context")
         }
         1 => {
@@ -54,7 +71,6 @@ pub async fn run() -> Result<()> {
             let project_info = project::detect_project(&cwd);
 
             if let Some(proj) = project_info {
-                let home = imp_home()?;
                 let project_dir = home.join("projects").join(&proj.name);
                 fs::create_dir_all(&project_dir)?;
                 (project_dir.join("CONTEXT.md"), "project context")
@@ -69,10 +85,27 @@ pub async fn run() -> Result<()> {
         }
         2 => {
             // General knowledge - update MEMORY.md
-            let home = imp_home()?;
             (home.join("MEMORY.md"), "long-term memory")
         }
-        _ => unreachable!(),
+        n => {
+            // Dynamic engineering context options (indices 3+)
+            let mut idx = 3;
+            if has_stack && n == idx {
+                (home.join("STACK.md"), "tech stack")
+            } else {
+                if has_stack { idx += 1; }
+                if has_arch && n == idx {
+                    (home.join("ARCHITECTURE.md"), "architecture")
+                } else {
+                    if has_arch { idx += 1; }
+                    if has_principles && n == idx {
+                        (home.join("PRINCIPLES.md"), "coding principles")
+                    } else {
+                        unreachable!()
+                    }
+                }
+            }
+        }
     };
 
     // Read existing content

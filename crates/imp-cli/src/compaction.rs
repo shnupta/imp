@@ -3,9 +3,8 @@ use serde_json::Value;
 
 const CHARS_PER_TOKEN: usize = 4;
 const CONTEXT_LIMIT_TOKENS: usize = 200_000;
-/// Trigger compaction at 60% — leaves headroom for tool schemas, system prompt,
-/// and large tool results that can arrive in a single iteration.
-const COMPACTION_THRESHOLD: f64 = 0.60;
+/// Reserve tokens for the model's response (thinking + output)
+const RESPONSE_BUFFER_TOKENS: usize = 20_000;
 const KEEP_RECENT_MESSAGES: usize = 10;
 
 /// Estimate token count for a message
@@ -33,10 +32,20 @@ fn estimate_total_tokens(messages: &[Message]) -> usize {
     messages.iter().map(estimate_tokens).sum()
 }
 
-/// Check if compaction is needed based on estimated token usage.
-fn needs_compaction(messages: &[Message], system_prompt_tokens: usize) -> bool {
-    let total = estimate_total_tokens(messages) + system_prompt_tokens;
-    total as f64 > (CONTEXT_LIMIT_TOKENS as f64 * COMPACTION_THRESHOLD)
+/// Estimate tokens for tool schemas (JSON serialized size / 4)
+fn estimate_tool_tokens(tools: &Value) -> usize {
+    tools.to_string().len() / CHARS_PER_TOKEN
+}
+
+/// Check if compaction is needed based on actual available budget.
+///
+/// available = context_limit - system_prompt - tool_schemas - response_buffer
+/// compact when messages exceed available
+fn needs_compaction(messages: &[Message], system_prompt_tokens: usize, tool_tokens: usize) -> bool {
+    let overhead = system_prompt_tokens + tool_tokens + RESPONSE_BUFFER_TOKENS;
+    let available = CONTEXT_LIMIT_TOKENS.saturating_sub(overhead);
+    let message_tokens = estimate_total_tokens(messages);
+    message_tokens > available
 }
 
 /// Create a compaction summary from messages
@@ -116,10 +125,11 @@ fn do_compact(messages: &[Message]) -> Vec<Message> {
     compacted
 }
 
-/// Proactive compaction: runs every iteration, compacts if estimated token usage
-/// exceeds the threshold. This is the primary compaction mechanism.
-pub fn compact_if_needed(messages: &[Message], system_prompt_tokens: usize) -> Vec<Message> {
-    if !needs_compaction(messages, system_prompt_tokens) {
+/// Proactive compaction: runs every iteration, compacts when estimated message
+/// tokens exceed the available budget (context limit minus system prompt, tool
+/// schemas, and response buffer). Adapts automatically to the actual overhead.
+pub fn compact_if_needed(messages: &[Message], system_prompt_tokens: usize, tool_tokens: usize) -> Vec<Message> {
+    if !needs_compaction(messages, system_prompt_tokens, tool_tokens) {
         return messages.to_vec();
     }
 

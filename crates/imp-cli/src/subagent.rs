@@ -232,8 +232,9 @@ impl SubAgent {
                 break;
             }
 
-            messages = crate::compaction::compact_if_needed(&messages, system_tokens_estimate);
             let tool_schemas = Some(tools.get_tool_schemas().await);
+            let tool_tokens = tool_schemas.as_ref().map_or(0, |t| t.to_string().len() / 4);
+            messages = crate::compaction::compact_if_needed(&messages, system_tokens_estimate, tool_tokens);
 
             let response = match client
                 .send_message(

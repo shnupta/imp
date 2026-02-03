@@ -180,8 +180,9 @@ impl Agent {
 
             let system_prompt = self.context.assemble_system_prompt();
             let system_tokens = system_prompt.len() / 4;
-            self.messages = compaction::compact_if_needed(&self.messages, system_tokens);
             let tools = Some(self.tools.get_tool_schemas().await);
+            let tool_tokens = tools.as_ref().map_or(0, |t| t.to_string().len() / 4);
+            self.messages = compaction::compact_if_needed(&self.messages, system_tokens, tool_tokens);
 
             // Show thinking indicator for non-streaming mode
             let show_thinking = !stream && self.config.thinking.enabled;

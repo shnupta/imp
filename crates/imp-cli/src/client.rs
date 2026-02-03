@@ -179,12 +179,6 @@ impl ClaudeClient {
                     "x-api-key",
                     HeaderValue::from_str(api_key)?,
                 );
-                if self.config.thinking.enabled {
-                    headers.insert(
-                        "anthropic-beta",
-                        HeaderValue::from_static("extended-thinking-2025-04-30"),
-                    );
-                }
             }
             AuthMethod::OAuth => {
                 let oauth_config = self.config.oauth_config()
@@ -194,14 +188,9 @@ impl ClaudeClient {
                     HeaderValue::from_str(&format!("Bearer {}", oauth_config.access_token))?,
                 );
                 // Add required OAuth headers
-                let beta_value = if self.config.thinking.enabled {
-                    "claude-code-20250219,oauth-2025-04-20,extended-thinking-2025-04-30"
-                } else {
-                    "claude-code-20250219,oauth-2025-04-20"
-                };
                 headers.insert(
                     "anthropic-beta",
-                    HeaderValue::from_static(beta_value),
+                    HeaderValue::from_static("claude-code-20250219,oauth-2025-04-20"),
                 );
                 headers.insert(
                     "user-agent",

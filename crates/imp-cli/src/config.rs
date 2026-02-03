@@ -17,7 +17,7 @@ pub struct LlmConfig {
 }
 
 fn default_model() -> String {
-    "claude-opus-4-5-20250514".to_string()
+    "claude-opus-4-5-20251101".to_string()
 }
 
 /// Returns the Imp home directory (~/.imp/ by default, respects IMP_HOME env var).

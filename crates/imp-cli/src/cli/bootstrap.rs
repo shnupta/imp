@@ -116,7 +116,7 @@ pub async fn run() -> Result<()> {
         llm: LlmConfig {
             provider: "anthropic".to_string(),
             api_key,
-            model: "claude-opus-4-5-20250514".to_string(),
+            model: "claude-opus-4-5-20251101".to_string(),
         },
     };
     config.save()?;

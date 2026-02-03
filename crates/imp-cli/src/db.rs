@@ -153,7 +153,9 @@ impl Database {
                     .conn
                     .prepare(
                         "SELECT id, project, created_at, updated_at, title, message_count \
-                         FROM sessions WHERE project = ?1 ORDER BY updated_at DESC LIMIT 1",
+                         FROM sessions WHERE project = ?1 \
+                         AND project NOT LIKE 'subagent-%' \
+                         ORDER BY updated_at DESC LIMIT 1",
                     )
                     .map_err(|e| ImpError::Database(e.to_string()))?;
 
@@ -180,7 +182,9 @@ impl Database {
                     .conn
                     .prepare(
                         "SELECT id, project, created_at, updated_at, title, message_count \
-                         FROM sessions ORDER BY updated_at DESC LIMIT 1",
+                         FROM sessions WHERE project IS NULL \
+                         OR project NOT LIKE 'subagent-%' \
+                         ORDER BY updated_at DESC LIMIT 1",
                     )
                     .map_err(|e| ImpError::Database(e.to_string()))?;
 

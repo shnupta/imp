@@ -139,12 +139,16 @@ impl ContextManager {
                 );
             }
 
-            // L2: Directory structure snapshot (generated on-demand)
-            l2_manifest.push(L2FileInfo {
-                path: format!("(run: find {} -type f -name '*.rs' -o -name '*.js' -o -name '*.py' -o -name '*.go' -o -name '*.java' | head -50)", proj.path),
-                heading: format!("Key source files — {}", proj.name),
-                size_hint: "run via exec".to_string(),
-            });
+            // L2: Directory structure snapshot (pre-generated tree)
+            let tree = generate_directory_structure(project_path);
+            let tree_path = home.join("projects").join(&proj.name).join(".tree_cache");
+            if let Ok(()) = fs::write(&tree_path, &tree) {
+                register_l2_file(
+                    &tree_path,
+                    &format!("Directory structure — {}", proj.name),
+                    &mut l2_manifest,
+                );
+            }
 
             // Git context → L2 (just note that it's available)
             register_git_context_l2(project_path, &proj.name, &mut l2_manifest);

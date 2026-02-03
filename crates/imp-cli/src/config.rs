@@ -50,6 +50,9 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    /// Custom API base URL (e.g. for LiteLLM proxies). Defaults to provider's official URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
     /// Legacy API key field - still supported for backward compatibility
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -177,17 +180,21 @@ impl Config {
                     ));
                 }
 
-                if !api_key_config.key.starts_with("sk-ant-") {
-                    return Err(ImpError::Config(
-                        "API key doesn't look like a valid Anthropic key (should start with 'sk-ant-')".to_string()
-                    ));
-                }
-                
-                // If user has an OAuth token in the API key field, auto-switch to OAuth
-                if api_key_config.key.starts_with("sk-ant-oat") {
-                    return Err(ImpError::Config(
-                        "You have an OAuth token but API key auth is configured. Run 'imp login' to switch to OAuth.".to_string()
-                    ));
+                // Only validate key format when using the default Anthropic API
+                // (custom base URLs like LiteLLM proxies use different token formats)
+                if config.llm.base_url.is_none() {
+                    if !api_key_config.key.starts_with("sk-ant-") {
+                        return Err(ImpError::Config(
+                            "API key doesn't look like a valid Anthropic key (should start with 'sk-ant-'). If using a proxy, set base_url in [llm].".to_string()
+                        ));
+                    }
+                    
+                    // If user has an OAuth token in the API key field, auto-switch to OAuth
+                    if api_key_config.key.starts_with("sk-ant-oat") {
+                        return Err(ImpError::Config(
+                            "You have an OAuth token but API key auth is configured. Run 'imp login' to switch to OAuth.".to_string()
+                        ));
+                    }
                 }
             }
             AuthMethod::OAuth => {

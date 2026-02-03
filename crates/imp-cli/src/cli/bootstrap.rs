@@ -102,6 +102,7 @@ pub async fn run() -> Result<()> {
             provider: "anthropic".to_string(),
             model: "claude-opus-4-5-20251101".to_string(),
             max_tokens: 16384,
+            base_url: None,
             api_key: None, // Legacy field - not used in new format
         },
         auth: AuthConfig::default(),

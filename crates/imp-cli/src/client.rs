@@ -156,10 +156,15 @@ impl ClaudeClient {
             .build()
             .unwrap();
 
+        let base_url = config.llm.base_url.clone()
+            .unwrap_or_else(|| "https://api.anthropic.com".to_string())
+            .trim_end_matches('/')
+            .to_string();
+
         Ok(Self {
             client,
             model: config.llm.model.clone(),
-            base_url: "https://api.anthropic.com".to_string(),
+            base_url,
             config,
         })
     }

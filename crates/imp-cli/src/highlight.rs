@@ -111,6 +111,11 @@ fn find_closing_fence(text: &str, from: usize) -> Option<usize> {
     None
 }
 
+/// ANSI escape for a subtle dark background (RGB 30, 35, 45 — slightly lighter
+/// than typical terminal backgrounds, matches base16-ocean.dark's feel).
+const BG_START: &str = "\x1b[48;2;30;35;45m";
+const BG_RESET: &str = "\x1b[0m";
+
 /// Try to syntax-highlight a code block. Returns None if the language
 /// is empty or not recognised by syntect.
 fn try_highlight(lang: &str, code: &str) -> Option<String> {
@@ -123,13 +128,53 @@ fn try_highlight(lang: &str, code: &str) -> Option<String> {
     let mut h = HighlightLines::new(syntax, theme);
     let mut output = String::new();
 
+    // Get terminal width for padding lines to full width
+    let term_width = terminal_width();
+
     for line in LinesWithEndings::from(code) {
         let ranges = h.highlight_line(line, &SYNTAX_SET).ok()?;
         let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-        output.push_str(&escaped);
+
+        // Strip the trailing newline from the highlighted text so we can pad it
+        let trimmed = escaped.trim_end_matches('\n');
+        // Estimate visible length (strip ANSI escapes)
+        let visible_len = strip_ansi_len(trimmed);
+        let padding = term_width.saturating_sub(visible_len);
+
+        output.push_str(BG_START);
+        output.push_str(trimmed);
+        // Pad to terminal width so the background fills the line
+        for _ in 0..padding {
+            output.push(' ');
+        }
+        output.push_str(BG_RESET);
+        output.push('\n');
     }
-    // Reset terminal colors
-    output.push_str("\x1b[0m");
 
     Some(output)
+}
+
+/// Get terminal width, defaulting to 80 if unavailable.
+fn terminal_width() -> usize {
+    terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(80)
+}
+
+/// Estimate the visible (non-ANSI-escape) length of a string.
+fn strip_ansi_len(s: &str) -> usize {
+    let mut len = 0;
+    let mut in_escape = false;
+    for c in s.chars() {
+        if c == '\x1b' {
+            in_escape = true;
+        } else if in_escape {
+            if c == 'm' {
+                in_escape = false;
+            }
+        } else {
+            len += 1;
+        }
+    }
+    len
 }

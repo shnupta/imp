@@ -68,93 +68,52 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
     let mut rl = DefaultEditor::new().expect("Failed to initialize line editor");
 
     loop {
-        // Race: wait for user input OR sub-agent completion
-        let input = loop {
-            let has_subagents = agent.has_active_subagents();
+        // Before prompting, check for completed sub-agents and auto-summarize
+        let completed = agent.collect_completed_subagents().await;
+        if !completed.is_empty() {
+            let results_text = completed
+                .iter()
+                .map(|r| r.format_report())
+                .collect::<Vec<_>>()
+                .join("\n---\n");
 
-            if has_subagents {
-                // Use spawn_blocking so we can select! against sub-agent completion
-                let prompt = format!("{} ", style("You:").bold().green());
-                let readline_future = {
-                    // Move editor into blocking thread, get it back after
-                    let mut editor = std::mem::replace(&mut rl, DefaultEditor::new().unwrap());
-                    tokio::task::spawn_blocking(move || {
-                        let result = editor.readline(&prompt);
-                        (editor, result)
-                    })
-                };
+            eprintln!(
+                "\n{}",
+                style(format!("📬 {} sub-agent(s) completed — generating summary...", completed.len())).yellow()
+            );
 
-                tokio::select! {
-                    readline_result = readline_future => {
-                        let (editor, result) = readline_result.unwrap();
-                        rl = editor;
-                        match result {
-                            Ok(line) => break line,
-                            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
-                                // Can't break outer loop from here, use sentinel
-                                break "\x04".to_string(); // EOT sentinel
-                            }
-                            Err(_) => break "\x04".to_string(),
-                        }
-                    }
-                    completed = agent.wait_for_subagent() => {
-                        // Sub-agent finished! Print notification and auto-summarize.
-                        let results_text = completed
-                            .iter()
-                            .map(|r| r.format_report())
-                            .collect::<Vec<_>>()
-                            .join("\n---\n");
+            // Auto-trigger agent response with sub-agent results
+            let synthetic_msg = format!(
+                "[Sub-agent results — {} task(s) completed]\n\n{}\n\n\
+                Summarize what the sub-agent accomplished. Be concise.",
+                completed.len(),
+                results_text
+            );
 
-                        eprintln!(
-                            "\n{}",
-                            style(format!("📬 {} sub-agent(s) completed — generating summary...", completed.len())).yellow()
-                        );
+            println!(
+                "\n{}",
+                style(format!("{}:", agent.display_name())).bold().blue()
+            );
+            println!("{}", style("─".repeat(20)).dim());
 
-                        // Auto-trigger agent response with sub-agent results
-                        let synthetic_msg = format!(
-                            "[Sub-agent results — {} task(s) completed]\n\n{}\n\n\
-                            Summarize what the sub-agent accomplished. Be concise.",
-                            completed.len(),
-                            results_text
-                        );
-
-                        println!(
-                            "\n{}",
-                            style(format!("{}:", agent.display_name())).bold().blue()
-                        );
-                        println!("{}", style("─".repeat(20)).dim());
-
-                        match agent.process_message(&synthetic_msg, true).await {
-                            Ok(_) => {
-                                println!("\n{}", style("─".repeat(50)).dim());
-                                println!();
-                            }
-                            Err(e) => {
-                                eprintln!("{}", style(format!("⚠ Failed to summarize: {}", e)).dim());
-                            }
-                        }
-
-                        // Continue loop — readline future was cancelled, restart it
-                        continue;
-                    }
+            match agent.process_message(&synthetic_msg, true).await {
+                Ok(_) => {
+                    println!("\n{}", style("─".repeat(50)).dim());
+                    println!();
                 }
-            } else {
-                // No sub-agents running — simple blocking readline
-                let readline = rl.readline(&format!("{} ", style("You:").bold().green()));
-                match readline {
-                    Ok(line) => break line,
-                    Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
-                        break "\x04".to_string();
-                    }
-                    Err(_) => break "\x04".to_string(),
+                Err(e) => {
+                    eprintln!("{}", style(format!("⚠ Failed to summarize: {}", e)).dim());
                 }
             }
-        };
-
-        // Handle EOT sentinel (Ctrl+C / Ctrl+D)
-        if input == "\x04" {
-            break;
         }
+
+        // Simple blocking readline — safe, no stdin contention
+        let readline = rl.readline(&format!("{} ", style("You:").bold().green()));
+        let input = match readline {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
+            Err(_) => break,
+        };
 
         let input = input.trim();
 
@@ -216,9 +175,9 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
         );
         println!("{}", style("─".repeat(20)).dim());
 
-        match agent.process_message(input, true).await {
+        match agent.process_message_with_markdown(input).await {
             Ok(_) => {
-                println!("\n{}", style("─".repeat(50)).dim());
+                println!("{}", style("─".repeat(50)).dim());
                 println!();
             }
             Err(e) => {

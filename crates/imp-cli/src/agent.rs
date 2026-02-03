@@ -496,7 +496,7 @@ impl Agent {
     }
 
     /// Collect results from all finished sub-agents, removing them from the tracking list.
-    async fn collect_completed_subagents(&mut self) -> Vec<SubAgentResult> {
+    pub async fn collect_completed_subagents(&mut self) -> Vec<SubAgentResult> {
         let mut completed = Vec::new();
         let mut remaining = Vec::new();
 

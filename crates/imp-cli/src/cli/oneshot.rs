@@ -21,7 +21,7 @@ pub async fn run(message: &str) -> Result<()> {
     }
     println!();
 
-    let _response = agent.process_message(message, true).await?;
+    let _response = agent.process_message_with_markdown(message).await?;
 
     println!("\n{}", style("─".repeat(50)).dim());
 

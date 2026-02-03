@@ -68,6 +68,8 @@ struct Delta {
     #[serde(rename = "type")]
     delta_type: String,
     text: Option<String>,
+    partial_json: Option<String>,
+    stop_reason: Option<String>,
 }
 
 pub struct ClaudeClient {
@@ -232,7 +234,9 @@ impl ClaudeClient {
 
         let mut stream = response.bytes_stream();
         let mut full_text = String::new();
-        let mut tool_calls: Vec<ContentBlock> = Vec::new();
+        let mut tool_calls_in_progress: std::collections::HashMap<usize, (String, String, String)> = std::collections::HashMap::new(); // index -> (id, name, accumulated_input)
+        let mut finalized_tool_calls: Vec<ContentBlock> = Vec::new();
+        let mut stop_reason: Option<String> = None;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result?;
@@ -250,16 +254,61 @@ impl ClaudeClient {
                             match event.event_type.as_str() {
                                 "content_block_start" => {
                                     if let Some(content_block) = event.content_block {
-                                        if let ContentBlock::ToolUse { .. } = content_block {
-                                            tool_calls.push(content_block);
+                                        if let ContentBlock::ToolUse { id, name, .. } = content_block {
+                                            // Start tracking this tool call
+                                            if let Some(index) = event.index {
+                                                tool_calls_in_progress.insert(index, (id, name, String::new()));
+                                            }
                                         }
                                     }
                                 }
                                 "content_block_delta" => {
                                     if let Some(delta) = event.delta {
-                                        if let Some(text) = delta.text {
-                                            full_text.push_str(&text);
-                                            print!("{}", text); // Stream to stdout
+                                        match delta.delta_type.as_str() {
+                                            "text_delta" => {
+                                                if let Some(text) = delta.text {
+                                                    full_text.push_str(&text);
+                                                    print!("{}", text); // Stream to stdout
+                                                }
+                                            }
+                                            "input_json_delta" => {
+                                                if let Some(partial_json) = delta.partial_json {
+                                                    if let Some(index) = event.index {
+                                                        if let Some((id, name, ref mut accumulated_input)) = tool_calls_in_progress.get_mut(&index) {
+                                                            accumulated_input.push_str(&partial_json);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                "content_block_stop" => {
+                                    // Finalize tool call if it was in progress
+                                    if let Some(index) = event.index {
+                                        if let Some((id, name, accumulated_input)) = tool_calls_in_progress.remove(&index) {
+                                            // Parse the accumulated JSON input
+                                            let input = if accumulated_input.is_empty() {
+                                                Value::Object(serde_json::Map::new()) // Empty object
+                                            } else {
+                                                match serde_json::from_str(&accumulated_input) {
+                                                    Ok(parsed) => parsed,
+                                                    Err(_) => {
+                                                        // If parsing fails, wrap the string as-is
+                                                        Value::String(accumulated_input)
+                                                    }
+                                                }
+                                            };
+                                            
+                                            finalized_tool_calls.push(ContentBlock::ToolUse { id, name, input });
+                                        }
+                                    }
+                                }
+                                "message_delta" => {
+                                    if let Some(delta) = event.delta {
+                                        if let Some(reason) = delta.stop_reason {
+                                            stop_reason = Some(reason);
                                         }
                                     }
                                 }
@@ -284,12 +333,12 @@ impl ClaudeClient {
         if !full_text.is_empty() {
             content_blocks.push(ContentBlock::Text { text: full_text });
         }
-        content_blocks.extend(tool_calls);
+        content_blocks.extend(finalized_tool_calls);
 
         Ok(AnthropicResponse {
             message_type: "message".to_string(),
             content: content_blocks,
-            stop_reason: Some("end_turn".to_string()),
+            stop_reason: stop_reason.or(Some("end_turn".to_string())),
             usage: None,
         })
     }

@@ -24,3 +24,4 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 eventsource-stream = { workspace = true }
 bytes = { workspace = true }
+termimad = "0.23"

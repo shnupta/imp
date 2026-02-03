@@ -5,6 +5,7 @@ use crate::error::{ImpError, Result};
 use crate::project::{self, ProjectInfo, ProjectRegistry};
 use crate::tools::ToolRegistry;
 use console::style;
+use termimad::*;
 
 pub struct Agent {
     client: ClaudeClient,
@@ -15,6 +16,16 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Render markdown text nicely in the terminal
+    fn render_markdown(text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        
+        let skin = MadSkin::default();
+        let _ = skin.print_text(text);
+    }
+
     /// Create an agent. Automatically detects the project from cwd and loads
     /// two-layer context (global + per-project).
     pub async fn new() -> Result<Self> {
@@ -60,6 +71,14 @@ impl Agent {
     }
 
     pub async fn process_message(&mut self, user_message: &str, stream: bool) -> Result<String> {
+        self.process_message_with_options(user_message, stream, false).await
+    }
+
+    pub async fn process_message_with_markdown(&mut self, user_message: &str) -> Result<String> {
+        self.process_message_with_options(user_message, false, true).await
+    }
+
+    async fn process_message_with_options(&mut self, user_message: &str, stream: bool, render_markdown: bool) -> Result<String> {
         self.messages.push(Message {
             role: "user".to_string(),
             content: user_message.to_string(),
@@ -101,6 +120,9 @@ impl Agent {
             }
 
             if tool_calls.is_empty() {
+                if render_markdown && !stream {
+                    Self::render_markdown(&text_content);
+                }
                 return Ok(text_content);
             }
 

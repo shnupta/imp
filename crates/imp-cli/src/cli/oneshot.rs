@@ -23,6 +23,7 @@ pub async fn run(message: &str) -> Result<()> {
 
     let _response = agent.process_message_with_markdown(message).await?;
 
+    println!("{}", style(agent.usage().format_session_total()).dim());
     println!("\n{}", style("─".repeat(50)).dim());
 
     Ok(())

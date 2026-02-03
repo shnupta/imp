@@ -102,6 +102,17 @@ impl ContextManager {
                 home.display()
             );
             prompt_parts.push(home_section);
+
+            prompt_parts.push(
+                "# Self-Learning\n\n\
+                You can and should update your own context files to improve over time:\n\
+                - ~/.imp/memory/YYYY-MM-DD.md — daily notes about what you learned\n\
+                - ~/.imp/projects/<name>/CONTEXT.md — project-specific knowledge\n\
+                - ~/.imp/projects/<name>/PATTERNS.md — code patterns and conventions you've noticed\n\
+                - ~/.imp/MEMORY.md — long-term memory (important things to remember)\n\n\
+                After completing significant work, use file_write to update relevant context files."
+                    .to_string(),
+            );
         }
 
         if self.sections.is_empty() {

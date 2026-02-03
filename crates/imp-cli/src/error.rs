@@ -31,6 +31,9 @@ pub enum ImpError {
     
     #[error("Config error: {0}")]
     Config(String),
+
+    #[error("Database error: {0}")]
+    Database(String),
 }
 
 impl From<toml::de::Error> for ImpError {

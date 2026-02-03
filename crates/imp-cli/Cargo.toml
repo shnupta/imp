@@ -25,3 +25,4 @@ futures = { workspace = true }
 eventsource-stream = { workspace = true }
 bytes = { workspace = true }
 termimad = "0.23"
+rusqlite = { version = "0.31", features = ["bundled"] }

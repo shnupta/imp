@@ -94,7 +94,7 @@ pub struct AnthropicResponse {
     message_type: String,
     content: Vec<ContentBlock>,
     stop_reason: Option<String>,
-    usage: Option<Usage>,
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,9 +113,9 @@ enum ContentBlock {
 }
 
 #[derive(Debug, Deserialize)]
-struct Usage {
-    input_tokens: u32,
-    output_tokens: u32,
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,6 +334,8 @@ impl ClaudeClient {
         let mut thinking_in_progress: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
         let mut finalized_thinking: Vec<ContentBlock> = Vec::new();
         let mut thinking_announced = false;
+        let mut usage_input_tokens: u32 = 0;
+        let mut usage_output_tokens: u32 = 0;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result?;
@@ -344,6 +346,39 @@ impl ClaudeClient {
                     let data = &line[6..]; // Remove "data: " prefix
                     if data == "[DONE]" {
                         break;
+                    }
+
+                    // Parse usage from message_start and message_delta before
+                    // attempting to deserialize into StreamEvent (different shape).
+                    if let Ok(raw) = serde_json::from_str::<Value>(data) {
+                        match raw.get("type").and_then(|t| t.as_str()) {
+                            Some("message_start") => {
+                                if let Some(usage) = raw.pointer("/message/usage") {
+                                    usage_input_tokens = usage.get("input_tokens")
+                                        .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                    // output_tokens in message_start is usually 0
+                                    usage_output_tokens = usage.get("output_tokens")
+                                        .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                }
+                                continue;
+                            }
+                            Some("message_delta") => {
+                                // Capture output tokens from top-level usage
+                                if let Some(usage) = raw.get("usage") {
+                                    if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                                        usage_output_tokens = out as u32;
+                                    }
+                                }
+                                // Also check for stop_reason in delta
+                                if let Some(delta) = raw.get("delta") {
+                                    if let Some(reason) = delta.get("stop_reason").and_then(|v| v.as_str()) {
+                                        stop_reason = Some(reason.to_string());
+                                    }
+                                }
+                                continue;
+                            }
+                            _ => {}
+                        }
                     }
 
                     match serde_json::from_str::<StreamEvent>(data) {
@@ -463,11 +498,20 @@ impl ClaudeClient {
         }
         content_blocks.extend(finalized_tool_calls);
 
+        let usage = if usage_input_tokens > 0 || usage_output_tokens > 0 {
+            Some(Usage {
+                input_tokens: usage_input_tokens,
+                output_tokens: usage_output_tokens,
+            })
+        } else {
+            None
+        };
+
         Ok(AnthropicResponse {
             message_type: "message".to_string(),
             content: content_blocks,
             stop_reason: stop_reason.or(Some("end_turn".to_string())),
-            usage: None,
+            usage,
         })
     }
 

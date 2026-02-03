@@ -2,7 +2,8 @@ use crate::agent::Agent;
 use crate::error::Result;
 use console::style;
 use dialoguer::Select;
-use std::io::{self, Write};
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 
 pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> Result<()> {
     let mut agent = Agent::new().await?;
@@ -43,7 +44,7 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
             .bold()
             .blue()
     );
-    println!("Type 'quit', 'exit', or Ctrl+C to end the session.");
+    println!("Type /help for commands, /quit or Ctrl+D to exit.");
     println!("{}", style("─".repeat(50)).dim());
 
     // Print session ID (first 8 chars)
@@ -63,25 +64,94 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
     }
     println!();
 
-    loop {
-        print!("{} ", style("You:").bold().green());
-        io::stdout().flush()?;
+    // Set up rustyline editor for input with history
+    let mut rl = DefaultEditor::new().expect("Failed to initialize line editor");
 
-        let mut input_buf = String::new();
-        match io::stdin().read_line(&mut input_buf) {
-            Ok(0) => break,  // EOF
-            Ok(_) => {}
-            Err(_) => break,
+    loop {
+        // Race: wait for user input OR sub-agent completion
+        let input = loop {
+            let has_subagents = agent.has_active_subagents();
+
+            if has_subagents {
+                // Use spawn_blocking so we can select! against sub-agent completion
+                let prompt = format!("{} ", style("You:").bold().green());
+                let readline_future = {
+                    // Move editor into blocking thread, get it back after
+                    let mut editor = std::mem::replace(&mut rl, DefaultEditor::new().unwrap());
+                    tokio::task::spawn_blocking(move || {
+                        let result = editor.readline(&prompt);
+                        (editor, result)
+                    })
+                };
+
+                tokio::select! {
+                    readline_result = readline_future => {
+                        let (editor, result) = readline_result.unwrap();
+                        rl = editor;
+                        match result {
+                            Ok(line) => break line,
+                            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                                // Can't break outer loop from here, use sentinel
+                                break "\x04".to_string(); // EOT sentinel
+                            }
+                            Err(_) => break "\x04".to_string(),
+                        }
+                    }
+                    completed = agent.wait_for_subagent() => {
+                        // Sub-agent finished! Print notification immediately.
+                        for result in &completed {
+                            let status = if result.success { "✅" } else { "❌" };
+                            eprintln!(
+                                "\n{}",
+                                style(format!(
+                                    "📬 Sub-agent #{} finished {} — {}",
+                                    result.id,
+                                    status,
+                                    if result.summary.len() > 80 {
+                                        let preview: String = result.summary.chars().take(80).collect();
+                                        format!("{}...", preview)
+                                    } else if result.summary.is_empty() {
+                                        "(no summary)".to_string()
+                                    } else {
+                                        result.summary.clone()
+                                    }
+                                )).yellow()
+                            );
+                        }
+                        // Continue loop — readline future was cancelled, we'll restart it
+                        continue;
+                    }
+                }
+            } else {
+                // No sub-agents running — simple blocking readline
+                let readline = rl.readline(&format!("{} ", style("You:").bold().green()));
+                match readline {
+                    Ok(line) => break line,
+                    Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                        break "\x04".to_string();
+                    }
+                    Err(_) => break "\x04".to_string(),
+                }
+            }
+        };
+
+        // Handle EOT sentinel (Ctrl+C / Ctrl+D)
+        if input == "\x04" {
+            break;
         }
 
-        let input = input_buf.trim();
+        let input = input.trim();
 
         if input.is_empty() {
             continue;
         }
 
+        // Add to history
+        let _ = rl.add_history_entry(input);
+
+        // Command handling (/ prefix and bare words for backward compat)
         match input.to_lowercase().as_str() {
-            "quit" | "exit" | "bye" | "q" => {
+            "/quit" | "/exit" | "/q" | "quit" | "exit" | "bye" | "q" => {
                 let aborted = agent.abort_subagents();
                 if aborted > 0 {
                     println!(
@@ -94,13 +164,31 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
                 println!("👋 Goodbye!");
                 break;
             }
-            "clear" => {
+            "/clear" | "clear" => {
                 agent.clear_conversation();
                 println!("🧹 Conversation cleared.");
                 continue;
             }
-            "help" => {
+            "/help" | "help" => {
                 show_help();
+                continue;
+            }
+            "/compact" => {
+                let compacted = agent.compact_now();
+                if compacted {
+                    println!("{}", style("📦 Conversation compacted.").green());
+                } else {
+                    println!("{}", style("No compaction needed yet.").dim());
+                }
+                continue;
+            }
+            "/session" => {
+                show_session_info(&agent);
+                continue;
+            }
+            "/agents" => {
+                let status = agent.check_agents_status().await;
+                println!("{}", status);
                 continue;
             }
             _ => {}
@@ -112,7 +200,7 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
         );
         println!("{}", style("─".repeat(20)).dim());
 
-        match agent.process_message_with_markdown(input).await {
+        match agent.process_message(input, true).await {
             Ok(_) => {
                 println!("\n{}", style("─".repeat(50)).dim());
                 println!();
@@ -228,12 +316,28 @@ fn format_relative_time(rfc3339: &str) -> String {
 }
 
 fn show_help() {
-    println!("{}", style("Available commands:").bold());
-    println!("  {} - Exit the chat", style("quit/exit/q").cyan());
-    println!(
-        "  {} - Clear conversation history",
-        style("clear").cyan()
-    );
-    println!("  {} - Show this help message", style("help").cyan());
-    println!("  {} - Ask anything else!", style("<your message>").cyan());
+    println!("{}", style("Commands:").bold());
+    println!("  {}  — Exit the chat", style("/quit, /exit, /q").cyan());
+    println!("  {}         — Clear conversation history", style("/clear").cyan());
+    println!("  {}       — Manually compact conversation", style("/compact").cyan());
+    println!("  {}       — Show session info", style("/session").cyan());
+    println!("  {}        — Show sub-agent status", style("/agents").cyan());
+    println!("  {}          — Show this help", style("/help").cyan());
+    println!("  {}  — Ask anything!", style("<your message>").cyan());
+}
+
+fn show_session_info(agent: &Agent) {
+    let duration_secs = agent.session_start_elapsed().as_secs();
+    let mins = duration_secs / 60;
+    let secs = duration_secs % 60;
+
+    let short_id = &agent.session_id()[..agent.session_id().len().min(8)];
+    println!("{}", style("Session Info:").bold());
+    println!("  ID:       {}", short_id);
+    if let Some(name) = agent.project_name() {
+        println!("  Project:  {}", name);
+    }
+    println!("  Messages: {}", agent.message_count());
+    println!("  Duration: {}m {}s", mins, secs);
+    println!("  {}", agent.usage().format_session_total());
 }

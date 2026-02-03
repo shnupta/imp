@@ -117,6 +117,22 @@ impl ContextManager {
 
             // Git context → L2 (just note that it's available)
             register_git_context_l2(Path::new(&proj.path), &proj.name, &mut l2_manifest);
+
+            // Auto-detect common AI coding assistant rules files
+            let project_root = Path::new(&proj.path);
+            for (rel_path, desc) in &[
+                (".cursorrules", "Cursor rules"),
+                ("CLAUDE.md", "Claude project instructions"),
+                ("AGENTS.md", "Agent instructions"),
+                (".github/copilot-instructions.md", "Copilot instructions"),
+            ] {
+                let full_path = project_root.join(rel_path);
+                register_l2_file(
+                    &full_path,
+                    &format!("{} — {}", desc, proj.name),
+                    &mut l2_manifest,
+                );
+            }
         }
 
         Ok(Self {

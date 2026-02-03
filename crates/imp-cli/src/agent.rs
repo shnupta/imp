@@ -15,6 +15,10 @@ use std::fs;
 use std::io::Write;
 use termimad::*;
 
+/// When false, `maybe_distill_insights` is a no-op. Users have `imp reflect`
+/// for proper distillation; the automatic version was too noisy.
+const AUTO_INSIGHTS: bool = false;
+
 pub struct Agent {
     client: ClaudeClient,
     config: Config,
@@ -130,12 +134,14 @@ impl Agent {
 
         self.messages.push(Message::text("user", &effective_message));
         // Persist user message
-        let _ = self.db.save_message(
+        if let Err(e) = self.db.save_message(
             &self.session_id,
             "user",
             &serde_json::Value::String(effective_message.clone()),
             0,
-        );
+        ) {
+            eprintln!("{}", style(format!("⚠ DB write failed: {}", e)).dim());
+        }
 
         let mut iteration_count = 0;
         let max_iterations = 10;
@@ -180,17 +186,26 @@ impl Agent {
                 let assistant_content = json!(content_blocks);
                 self.messages.push(Message::with_content("assistant", assistant_content.clone()));
                 // Persist assistant message
-                let _ = self.db.save_message(
+                if let Err(e) = self.db.save_message(
                     &self.session_id,
                     "assistant",
                     &assistant_content,
                     tool_calls.len(),
-                );
+                ) {
+                    eprintln!("{}", style(format!("⚠ DB write failed: {}", e)).dim());
+                }
             }
 
             if tool_calls.is_empty() {
                 if render_markdown && !stream {
                     Self::render_markdown(&text_content);
+                }
+                // Auto-generate session title after the first exchange
+                if self.messages.len() <= 2 {
+                    let title = generate_session_title(user_message);
+                    if let Err(e) = self.db.update_session_title(&self.session_id, &title) {
+                        eprintln!("{}", style(format!("⚠ Failed to set session title: {}", e)).dim());
+                    }
                 }
                 // Distill structured insights from this turn
                 self.maybe_distill_insights(user_message, &text_content, turn_tool_count);
@@ -249,12 +264,14 @@ impl Agent {
             if !tool_results.is_empty() {
                 let tool_msg = Message::tool_results(tool_results);
                 // Persist tool results
-                let _ = self.db.save_message(
+                if let Err(e) = self.db.save_message(
                     &self.session_id,
                     "user",
                     &tool_msg.content,
                     0,
-                );
+                ) {
+                    eprintln!("{}", style(format!("⚠ DB write failed: {}", e)).dim());
+                }
                 self.messages.push(tool_msg);
             }
         }
@@ -271,6 +288,31 @@ impl Agent {
     /// Get the current session ID.
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Elapsed time since session start.
+    pub fn session_start_elapsed(&self) -> std::time::Duration {
+        self.session_start.elapsed()
+    }
+
+    /// Number of messages in the current conversation.
+    pub fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Manually trigger compaction. Returns true if compaction was performed.
+    pub fn compact_now(&mut self) -> bool {
+        let system_prompt = self.context.assemble_system_prompt();
+        let system_tokens = system_prompt.len() / 4;
+        let before = self.messages.len();
+        self.messages = compaction::compact_if_needed(&self.messages, system_tokens);
+        self.messages.len() < before
+    }
+
+    /// Get a human-readable status string for sub-agents (for /agents command).
+    pub async fn check_agents_status(&mut self) -> String {
+        let result = self.handle_check_agents().await;
+        result.content
     }
 
     /// Resume a previous session: load its messages from the database.
@@ -300,6 +342,9 @@ impl Agent {
         if tool_count > 0 {
             self.total_tool_calls += tool_count;
         }
+        if !AUTO_INSIGHTS {
+            return;
+        }
         // Only distill if the turn was substantive
         if tool_count == 0 && response_text.len() < 200 {
             return;
@@ -324,11 +369,14 @@ impl Agent {
             truncate(response_text, 300),
         );
 
-        let _ = fs::OpenOptions::new()
+        if let Err(e) = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&filepath)
-            .and_then(|mut f| f.write_all(entry.as_bytes()));
+            .and_then(|mut f| f.write_all(entry.as_bytes()))
+        {
+            eprintln!("{}", style(format!("⚠ Memory write failed: {}", e)).dim());
+        }
     }
 
     // ── Sub-agent management ─────────────────────────────────────────
@@ -361,8 +409,9 @@ impl Agent {
         let handle = subagent.spawn();
 
         let id = handle.id;
-        let task_preview = if handle.task.len() > 100 {
-            format!("{}...", &handle.task[..100])
+        let task_preview = if handle.task.chars().count() > 100 {
+            let preview: String = handle.task.chars().take(100).collect();
+            format!("{}...", preview)
         } else {
             handle.task.clone()
         };
@@ -377,7 +426,10 @@ impl Agent {
         crate::tools::ToolResult {
             tool_use_id: tool_call.id.clone(),
             content: format!(
-                "Sub-agent #{} spawned for: {}\nUse check_agents to monitor progress and get results.",
+                "Sub-agent #{} spawned for: {}\n\
+                The sub-agent is working in the background. Do NOT call check_agents immediately — \
+                it takes time to complete. Return to the user and let them know the task is running. \
+                Results will be automatically injected when they're ready (on the user's next message).",
                 id, task_preview
             ),
             error: None,
@@ -414,8 +466,9 @@ impl Agent {
                 ));
                 for handle in &self.sub_agents {
                     let elapsed = handle.spawned_at.elapsed().as_secs();
-                    let task_preview = if handle.task.len() > 80 {
-                        format!("{}...", &handle.task[..80])
+                    let task_preview = if handle.task.chars().count() > 80 {
+                        let preview: String = handle.task.chars().take(80).collect();
+                        format!("{}...", preview)
                     } else {
                         handle.task.clone()
                     };
@@ -424,6 +477,10 @@ impl Agent {
                         handle.id, elapsed, task_preview
                     ));
                 }
+                output.push_str(
+                    "\nSub-agents are still working. Do NOT call check_agents again — \
+                    return to the user. Results will auto-inject on the next message."
+                );
             }
         }
 
@@ -467,6 +524,29 @@ impl Agent {
         completed
     }
 
+    /// Whether there are any active (still running) sub-agents.
+    pub fn has_active_subagents(&self) -> bool {
+        !self.sub_agents.is_empty()
+    }
+
+    /// Wait until at least one sub-agent completes. Returns the completed results.
+    /// If no sub-agents are active, returns an empty vec immediately.
+    pub async fn wait_for_subagent(&mut self) -> Vec<SubAgentResult> {
+        if self.sub_agents.is_empty() {
+            return Vec::new();
+        }
+
+        // Poll every 500ms until something finishes
+        loop {
+            // Check if any have finished
+            let any_finished = self.sub_agents.iter().any(|h| h.handle.is_finished());
+            if any_finished {
+                return self.collect_completed_subagents().await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
     /// Abort all running sub-agents. Called when the chat session ends.
     /// Returns the number of sub-agents that were still running.
     pub fn abort_subagents(&mut self) -> usize {
@@ -500,20 +580,49 @@ impl Agent {
             self.total_tool_calls,
         );
 
-        let _ = fs::OpenOptions::new()
+        if let Err(e) = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&filepath)
-            .and_then(|mut f| f.write_all(entry.as_bytes()));
+            .and_then(|mut f| f.write_all(entry.as_bytes()))
+        {
+            eprintln!("{}", style(format!("⚠ Memory write failed: {}", e)).dim());
+        }
     }
 }
 
-/// Truncate a string to a maximum character length, appending "..." if truncated.
+/// Generate a session title from the first user message.
+/// Truncates to ~60 chars at a word boundary.
+fn generate_session_title(user_message: &str) -> String {
+    let clean = user_message.trim().replace('\n', " ");
+    let char_count = clean.chars().count();
+    if char_count <= 60 {
+        return clean;
+    }
+    // Find last word boundary before 60 chars
+    let end_byte: usize = clean.char_indices()
+        .nth(60)
+        .map(|(i, _)| i)
+        .unwrap_or(clean.len());
+    let slice = &clean[..end_byte];
+    match slice.rfind(char::is_whitespace) {
+        Some(pos) if pos > 20 => format!("{}…", &slice[..pos]),
+        _ => format!("{}…", slice),
+    }
+}
+
+/// Truncate a string to a maximum character count, appending "..." if truncated.
+/// Uses char boundaries to avoid panicking on multi-byte UTF-8.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let char_count = s.chars().count();
+    if char_count <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let end: usize = s.char_indices()
+            .nth(max)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
+        format!("{}...", &s[..end])
     }
 }
 
@@ -529,15 +638,15 @@ fn format_tool_call(name: &str, input: &serde_json::Value) -> String {
     for (key, val) in args {
         let formatted = match val {
             serde_json::Value::String(s) => {
-                let len = s.len();
-                if len > 100 {
+                let char_count = s.chars().count();
+                if char_count > 100 {
                     // Show a preview of the string, then the total length
-                    let preview = &s[..60.min(s.len())];
+                    let preview: String = s.chars().take(60).collect();
                     // Cut at last whitespace for cleaner preview
                     let cut = preview.rfind(char::is_whitespace)
                         .filter(|&pos| pos > 20)
                         .unwrap_or(preview.len());
-                    format!("\"{}…\" ({len} chars)", &s[..cut])
+                    format!("\"{}…\" ({char_count} chars)", &preview[..cut])
                 } else {
                     format!("\"{}\"", s)
                 }
@@ -546,8 +655,9 @@ fn format_tool_call(name: &str, input: &serde_json::Value) -> String {
             serde_json::Value::Object(obj) => format!("{{{} keys}}", obj.len()),
             other => {
                 let s = other.to_string();
-                if s.len() > 100 {
-                    format!("{}...", &s[..97])
+                if s.chars().count() > 100 {
+                    let preview: String = s.chars().take(97).collect();
+                    format!("{}...", preview)
                 } else {
                     s
                 }

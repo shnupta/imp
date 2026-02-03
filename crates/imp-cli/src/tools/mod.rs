@@ -420,8 +420,8 @@ impl ToolRegistry {
                     params.insert("max_tokens_budget".to_string(), ParameterDef {
                         param_type: "integer".to_string(),
                         required: false,
-                        default: Some(Value::Number(serde_json::Number::from(50000))),
-                        description: Some("Maximum token budget for this sub-agent (default: 50000). Prevents runaway costs.".to_string()),
+                        default: Some(Value::Number(serde_json::Number::from(200000))),
+                        description: Some("Maximum total token budget (input + output) for this sub-agent. Default: 200000. Scale based on task complexity: ~50k for small edits, ~200k for moderate work, ~500k+ for large codebase exploration or multi-file refactors.".to_string()),
                     });
                     params.insert("working_directory".to_string(), ParameterDef {
                         param_type: "string".to_string(),

@@ -93,7 +93,7 @@ impl SubAgent {
             id,
             task,
             working_directory: cwd,
-            max_tokens_budget: max_tokens_budget.unwrap_or(50_000),
+            max_tokens_budget: max_tokens_budget.unwrap_or(200_000),
             config,
         }
     }
@@ -322,8 +322,9 @@ fn extract_summary(text: &str) -> String {
     }
 
     // Fallback: return the full text, truncated
-    if text.len() > 500 {
-        format!("{}...", &text[..500])
+    if text.chars().count() > 500 {
+        let preview: String = text.chars().take(500).collect();
+        format!("{}...", preview)
     } else {
         text.to_string()
     }

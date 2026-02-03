@@ -44,12 +44,8 @@ impl ContextManager {
 
         // ── L1: Always loaded (lean, <2k tokens) ────────────────────
 
-        // Core identity files — always needed (SOUL.md preferred, IDENTITY.md fallback)
-        if home.join("SOUL.md").exists() {
-            load_md(&home, "SOUL.md", "Soul", &mut l1_sections);
-        } else {
-            load_md(&home, "IDENTITY.md", "Identity", &mut l1_sections);
-        }
+        // Core identity
+        load_md(&home, "SOUL.md", "Soul", &mut l1_sections);
         load_md(&home, "USER.md", "About Your Human", &mut l1_sections);
 
         // ── L2: Global files (on-demand) ─────────────────────────────
@@ -215,35 +211,21 @@ impl ContextManager {
             .collect()
     }
 
-    /// Extract the agent's name from the Soul/Identity section.
+    /// Extract the agent's name from SOUL.md.
     pub fn agent_name(&self) -> Option<String> {
-        // Try Soul first, then Identity (legacy)
-        let section = self
-            .l1_sections
-            .iter()
-            .find(|s| s.heading == "Soul")
-            .or_else(|| self.l1_sections.iter().find(|s| s.heading == "Identity"))?;
+        let section = self.l1_sections.iter().find(|s| s.heading == "Soul")?;
 
         for line in section.content.lines() {
             let trimmed = line.trim();
-            // SOUL.md format: "**Name**: Foo" or "**Your Name**: Foo"
-            for prefix in &["**Name**:", "**Your Name**:"] {
-                if let Some(rest) = trimmed.strip_prefix(prefix) {
-                    let name = rest.trim();
-                    if !name.is_empty() && !name.contains("{{") {
-                        return Some(name.to_string());
-                    }
-                }
-            }
-            // H1 format: "# Foo" (SOUL.md heading)
-            if let Some(rest) = trimmed.strip_prefix("# ") {
+            // "**Name**: Foo"
+            if let Some(rest) = trimmed.strip_prefix("**Name**:") {
                 let name = rest.trim();
-                if !name.is_empty() && !name.contains("{{") && !name.contains("Identity") {
+                if !name.is_empty() && !name.contains("{{") {
                     return Some(name.to_string());
                 }
             }
-            // Legacy: "# Your Identity: Foo"
-            if let Some(rest) = trimmed.strip_prefix("# Your Identity:") {
+            // "# Foo" (H1 heading)
+            if let Some(rest) = trimmed.strip_prefix("# ") {
                 let name = rest.trim();
                 if !name.is_empty() && !name.contains("{{") {
                     return Some(name.to_string());

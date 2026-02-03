@@ -150,15 +150,7 @@ impl SubAgent {
         // Load identity and user context so sub-agents share the parent's personality
         let identity_context = if let Ok(home) = imp_home() {
             let mut parts = Vec::new();
-            // Prefer SOUL.md, fall back to IDENTITY.md
-            let soul_path = home.join("SOUL.md");
-            let identity_path = home.join("IDENTITY.md");
-            let soul_file = if soul_path.exists() {
-                soul_path
-            } else {
-                identity_path
-            };
-            if let Ok(identity) = fs::read_to_string(soul_file) {
+            if let Ok(identity) = fs::read_to_string(home.join("SOUL.md")) {
                 let trimmed = identity.trim();
                 if !trimmed.is_empty() {
                     parts.push(format!("# Soul\n\n{}", trimmed));

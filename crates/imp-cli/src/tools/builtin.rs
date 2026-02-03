@@ -1,7 +1,7 @@
 use crate::error::{ImpError, Result};
 use serde_json::Value;
 use std::fs;
-use std::process::Command;
+use std::process::Command; // used by search_code, list_files
 
 pub async fn execute_builtin(tool_name: &str, arguments: &Value) -> Result<String> {
     match tool_name {
@@ -28,19 +28,40 @@ async fn exec_command(arguments: &Value) -> Result<String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| ImpError::Tool("Missing 'command' parameter".to_string()))?;
 
-    let output = Command::new("sh")
+    let timeout_secs = arguments.get("timeout_secs")
+        .and_then(|v| v.as_u64());
+
+    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(300));
+
+    let child = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(command)
-        .output()?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| ImpError::Tool(format!("Failed to spawn command: {}", e)))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if output.status.success() {
-        Ok(format!("Exit code: 0\nStdout:\n{}\nStderr:\n{}", stdout, stderr))
-    } else {
-        Ok(format!("Exit code: {}\nStdout:\n{}\nStderr:\n{}", 
-                   output.status.code().unwrap_or(-1), stdout, stderr))
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if output.status.success() {
+                Ok(format!("Exit code: 0\nStdout:\n{}\nStderr:\n{}", stdout, stderr))
+            } else {
+                Ok(format!("Exit code: {}\nStdout:\n{}\nStderr:\n{}",
+                    output.status.code().unwrap_or(-1), stdout, stderr))
+            }
+        }
+        Ok(Err(e)) => {
+            Err(ImpError::Tool(format!("Command error: {}", e)))
+        }
+        Err(_) => {
+            // Timeout — process is dropped which kills it automatically
+            Err(ImpError::Tool(format!(
+                "Command timed out after {}s: {}",
+                timeout.as_secs(), command
+            )))
+        }
     }
 }
 

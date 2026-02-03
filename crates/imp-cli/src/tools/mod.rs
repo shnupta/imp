@@ -10,7 +10,6 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 pub mod builtin;
 pub mod mcp;
@@ -251,7 +250,7 @@ impl ToolRegistry {
                 "shell" => {
                     if let Some(ref command_template) = tool_def.handler.command {
                         let command = self.render_template(command_template, &tool_call.arguments)?;
-                        execute_shell_command(&command).await
+                        execute_shell_command(&command, None).await
                     } else {
                         Err(ImpError::Tool("Shell handler missing command".to_string()))
                     }
@@ -308,19 +307,36 @@ impl ToolRegistry {
     }
 }
 
-async fn execute_shell_command(command: &str) -> Result<String> {
-    let output = Command::new("sh")
+async fn execute_shell_command(command: &str, timeout_secs: Option<u64>) -> Result<String> {
+    let child = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(command)
-        .output()?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| ImpError::Tool(format!("Failed to spawn command: {}", e)))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if output.status.success() {
-        Ok(stdout.to_string())
-    } else {
-        Err(ImpError::Tool(format!("Command failed: {}\nStderr: {}", command, stderr)))
+    let timeout = timeout_secs.unwrap_or(300); // 5 minute default
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout),
+        child.wait_with_output(),
+    ).await {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if output.status.success() {
+                Ok(stdout.to_string())
+            } else {
+                Err(ImpError::Tool(format!("Command failed: {}\nStderr: {}", command, stderr)))
+            }
+        }
+        Ok(Err(e)) => {
+            Err(ImpError::Tool(format!("Command error: {}", e)))
+        }
+        Err(_) => {
+            // Timeout — process is dropped which kills it automatically
+            Err(ImpError::Tool(format!("Command timed out after {}s: {}", timeout, command)))
+        }
     }
 }
 
@@ -330,7 +346,7 @@ impl ToolRegistry {
         ToolDefinition {
             tool: ToolMeta {
                 name: "exec".to_string(),
-                description: "Execute a shell command".to_string(),
+                description: "Execute a shell command. Commands have a default timeout of 300s (5 minutes). Use timeout_secs for long-running operations.".to_string(),
                 parameters: {
                     let mut params = HashMap::new();
                     params.insert("command".to_string(), ParameterDef {
@@ -338,6 +354,12 @@ impl ToolRegistry {
                         required: true,
                         default: None,
                         description: Some("The shell command to execute".to_string()),
+                    });
+                    params.insert("timeout_secs".to_string(), ParameterDef {
+                        param_type: "integer".to_string(),
+                        required: false,
+                        default: None,
+                        description: Some("Timeout in seconds. Default: 300 (5 minutes). Set higher for long-running builds or operations.".to_string()),
                     });
                     params
                 },
@@ -536,6 +558,12 @@ impl ToolRegistry {
                         required: false,
                         default: None,
                         description: Some("Working directory for the sub-agent's shell commands. Defaults to current directory.".to_string()),
+                    });
+                    params.insert("timeout_secs".to_string(), ParameterDef {
+                        param_type: "integer".to_string(),
+                        required: false,
+                        default: Some(Value::Number(serde_json::Number::from(600))),
+                        description: Some("Wall-clock timeout in seconds. The sub-agent is killed if it exceeds this. Default: 600 (10 minutes). Use higher values for complex multi-file tasks.".to_string()),
                     });
                     params
                 },

@@ -170,17 +170,13 @@ impl Agent {
             self.emit(style(format!("⚠ DB write failed: {}", e)).dim());
         }
 
-        let mut iteration_count = 0;
-        let max_iterations = 100;
         let mut turn_tool_count: usize = 0;
 
-        while iteration_count < max_iterations {
+        loop {
             // Check for interrupt before each iteration
             if self.is_interrupted() {
                 return Err(ImpError::Agent("interrupted".to_string()));
             }
-
-            iteration_count += 1;
 
             let system_prompt = self.context.assemble_system_prompt();
             let system_tokens = system_prompt.len() / 4; // rough estimate
@@ -320,10 +316,6 @@ impl Agent {
                 self.messages.push(tool_msg);
             }
         }
-
-        Err(ImpError::Agent(
-            "Maximum iteration limit reached".to_string(),
-        ))
     }
 
     pub fn clear_conversation(&mut self) {
@@ -450,7 +442,12 @@ impl Agent {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let subagent = SubAgent::new(task, working_dir, max_tokens, self.config.clone());
+        let timeout_secs = tool_call
+            .input
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64());
+
+        let subagent = SubAgent::new(task, working_dir, max_tokens, timeout_secs, self.config.clone());
         let handle = subagent.spawn();
 
         let id = handle.id;

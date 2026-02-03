@@ -71,6 +71,7 @@ pub struct SubAgent {
     task: String,
     working_directory: String,
     max_tokens_budget: u64,
+    timeout_secs: u64,
     config: Config,
 }
 
@@ -80,6 +81,7 @@ impl SubAgent {
         task: String,
         working_directory: Option<String>,
         max_tokens_budget: Option<u64>,
+        timeout_secs: Option<u64>,
         config: Config,
     ) -> Self {
         let id = NEXT_SUBAGENT_ID.fetch_add(1, Ordering::SeqCst);
@@ -94,6 +96,7 @@ impl SubAgent {
             task,
             working_directory: cwd,
             max_tokens_budget: max_tokens_budget.unwrap_or(200_000),
+            timeout_secs: timeout_secs.unwrap_or(600), // 10 minutes default
             config,
         }
     }
@@ -102,9 +105,22 @@ impl SubAgent {
     pub fn spawn(self) -> SubAgentHandle {
         let id = self.id;
         let task = self.task.clone();
+        let timeout = std::time::Duration::from_secs(self.timeout_secs);
 
         let handle = tokio::spawn(async move {
-            self.run().await
+            match tokio::time::timeout(timeout, self.run()).await {
+                Ok(result) => result,
+                Err(_) => SubAgentResult {
+                    id,
+                    task: String::new(), // will be overwritten below
+                    summary: String::new(),
+                    files_changed: Vec::new(),
+                    input_tokens_used: 0,
+                    output_tokens_used: 0,
+                    success: false,
+                    error: Some(format!("Sub-agent timed out after {}s", timeout.as_secs())),
+                },
+            }
         });
 
         SubAgentHandle {
@@ -203,10 +219,9 @@ impl SubAgent {
         let mut files_changed: Vec<String> = Vec::new();
         let mut final_text = String::new();
 
-        let max_iterations = 25;
         let system_tokens_estimate = system_prompt.len() / 4;
 
-        for _iteration in 0..max_iterations {
+        loop {
             // Check token budget before each API call
             if usage.total_tokens() >= self.max_tokens_budget {
                 final_text = format!(

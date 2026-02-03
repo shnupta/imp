@@ -90,6 +90,9 @@ impl Agent {
         let db = Database::open()?;
         let session_id = db.create_session(project_info.as_ref().map(|p| p.name.as_str()))?;
 
+        let mut usage = UsageTracker::new();
+        usage.set_model(&config.llm.model);
+
         Ok(Self {
             client,
             config,
@@ -99,7 +102,7 @@ impl Agent {
             project: project_info,
             session_start: std::time::Instant::now(),
             total_tool_calls: 0,
-            usage: UsageTracker::new(),
+            usage,
             db,
             session_id,
             sub_agents: Vec::new(),
@@ -202,7 +205,14 @@ impl Agent {
             // Record and display token usage
             if let Some(ref usage) = response.usage {
                 self.usage.record(usage.input_tokens, usage.output_tokens);
-                self.emit(style(UsageTracker::format_response_usage(usage.input_tokens, usage.output_tokens)).dim());
+                self.usage.record_cache(usage.cache_creation_input_tokens, usage.cache_read_input_tokens);
+                self.emit(style(UsageTracker::format_response_usage(
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                    Some(&self.config.llm.model),
+                )).dim());
             }
 
             let text_content = self.client.extract_text_content(&response);

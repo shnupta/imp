@@ -230,6 +230,7 @@ impl SubAgent {
             // Record token usage
             if let Some(ref resp_usage) = response.usage {
                 usage.record(resp_usage.input_tokens, resp_usage.output_tokens);
+                usage.record_cache(resp_usage.cache_creation_input_tokens, resp_usage.cache_read_input_tokens);
             }
 
             let text_content = client.extract_text_content(&response);

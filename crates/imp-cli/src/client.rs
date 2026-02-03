@@ -116,6 +116,10 @@ enum ContentBlock {
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -326,6 +330,8 @@ impl ClaudeClient {
         let mut thinking_announced = false;
         let mut usage_input_tokens: u32 = 0;
         let mut usage_output_tokens: u32 = 0;
+        let mut usage_cache_creation: u32 = 0;
+        let mut usage_cache_read: u32 = 0;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result?;
@@ -346,8 +352,11 @@ impl ClaudeClient {
                                 if let Some(usage) = raw.pointer("/message/usage") {
                                     usage_input_tokens = usage.get("input_tokens")
                                         .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                                    // output_tokens in message_start is usually 0
                                     usage_output_tokens = usage.get("output_tokens")
+                                        .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                    usage_cache_creation = usage.get("cache_creation_input_tokens")
+                                        .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                    usage_cache_read = usage.get("cache_read_input_tokens")
                                         .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                                 }
                                 continue;
@@ -501,6 +510,8 @@ impl ClaudeClient {
             Some(Usage {
                 input_tokens: usage_input_tokens,
                 output_tokens: usage_output_tokens,
+                cache_creation_input_tokens: usage_cache_creation,
+                cache_read_input_tokens: usage_cache_read,
             })
         } else {
             None

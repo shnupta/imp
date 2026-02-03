@@ -366,20 +366,26 @@ impl ToolRegistry {
         ToolDefinition {
             tool: ToolMeta {
                 name: "search_code".to_string(),
-                description: "Search for text in code files using ripgrep".to_string(),
+                description: "Search for text across all files using ripgrep. Searches all file types by default (code, config, docs, etc). Skips .git, node_modules, target, etc. Results include line numbers and context.".to_string(),
                 parameters: {
                     let mut params = HashMap::new();
                     params.insert("query".to_string(), ParameterDef {
                         param_type: "string".to_string(),
                         required: true,
                         default: None,
-                        description: Some("Text to search for".to_string()),
+                        description: Some("Text or regex pattern to search for".to_string()),
                     });
                     params.insert("path".to_string(), ParameterDef {
                         param_type: "string".to_string(),
                         required: false,
                         default: Some(Value::String(".".to_string())),
                         description: Some("Directory to search in (default: current directory)".to_string()),
+                    });
+                    params.insert("file_type".to_string(), ParameterDef {
+                        param_type: "string".to_string(),
+                        required: false,
+                        default: None,
+                        description: Some("Optional file extension filter (e.g. 'rs', 'toml', 'md'). Omit to search all files.".to_string()),
                     });
                     params
                 },

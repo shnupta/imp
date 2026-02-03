@@ -213,47 +213,61 @@ async fn search_code(arguments: &Value) -> Result<String> {
         .and_then(|v| v.as_str())
         .unwrap_or(".");
 
-    // Try ripgrep first (better performance and features)
-    if let Ok(output) = Command::new("rg")
-        .args(&[
-            "-n",           // Show line numbers
-            "--color", "never",  // No color output
-            "--type-add", "code:*.{rs,py,js,ts,go,java,cpp,c,h,hpp}", // Define code file types
-            "--type", "code",    // Search only code files
-            "--context", "2",    // Show 2 lines of context
-            "--max-count", "50", // Limit to 50 matches per file
-            query,
-            path
-        ])
-        .output() 
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.trim().is_empty() {
-                Ok(format!("No matches found for '{}' in code files under '{}'", query, path))
-            } else {
-                Ok(format!("Search results for '{}' in '{}':\n\n{}", query, path, stdout))
-            }
+    // Build ripgrep args
+    let mut rg_args = vec![
+        "-n".to_string(),              // line numbers
+        "--color".to_string(), "never".to_string(),
+        "--context".to_string(), "2".to_string(),
+        "--max-count".to_string(), "20".to_string(),  // per-file limit
+        "--max-columns".to_string(), "200".to_string(), // truncate long lines
+        "--max-columns-preview".to_string(),
+        "--hidden".to_string(),        // search dotfiles too
+    ];
+
+    // Skip binary files and common noise directories
+    for skip in &[".git", "node_modules", "target", "__pycache__", ".venv", "dist", "build"] {
+        rg_args.push("--glob".to_string());
+        rg_args.push(format!("!{}", skip));
+    }
+
+    // Optional file type filter
+    if let Some(file_type) = arguments.get("file_type").and_then(|v| v.as_str()) {
+        rg_args.push("--glob".to_string());
+        rg_args.push(format!("*.{}", file_type));
+    }
+
+    rg_args.push(query.to_string());
+    rg_args.push(path.to_string());
+
+    if let Ok(output) = Command::new("rg").args(&rg_args).output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.trim().is_empty() {
+            Ok(format!("No matches found for '{}' under '{}'", query, path))
         } else {
-            Ok(format!("No matches found for '{}' in code files under '{}'", query, path))
+            // Truncate if too large (prevent token blowout)
+            let result = stdout.to_string();
+            if result.len() > 15_000 {
+                let truncated: String = result.chars().take(15_000).collect();
+                Ok(format!(
+                    "Search results for '{}' in '{}' (truncated — refine query or use file_type filter):\n\n{}…",
+                    query, path, truncated
+                ))
+            } else {
+                Ok(format!("Search results for '{}' in '{}':\n\n{}", query, path, result))
+            }
         }
     } else {
-        // Fallback to basic grep
+        // Fallback to grep
         let output = Command::new("grep")
-            .args(&["-rn", "--include=*.rs", "--include=*.py", "--include=*.js", 
-                   "--include=*.ts", "--include=*.go", "--include=*.java", query, path])
+            .args(&["-rn", "--max-count=20", query, path])
             .output()
             .map_err(|e| ImpError::Tool(format!("Search command failed: {}", e)))?;
-            
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.trim().is_empty() {
-                Ok(format!("No matches found for '{}' in code files under '{}'", query, path))
-            } else {
-                Ok(format!("Search results for '{}' in '{}':\n\n{}", query, path, stdout))
-            }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.trim().is_empty() {
+            Ok(format!("No matches found for '{}' under '{}'", query, path))
         } else {
-            Ok(format!("No matches found for '{}' in code files under '{}'", query, path))
+            Ok(format!("Search results for '{}' in '{}':\n\n{}", query, path, stdout))
         }
     }
 }

@@ -1,6 +1,7 @@
 use crate::client::{ClaudeClient, Message};
 use crate::compaction;
 use crate::config::{imp_home, Config};
+use crate::highlight;
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::error::{ImpError, Result};
@@ -50,12 +51,14 @@ pub struct Agent {
 
 impl Agent {
     /// Render markdown text to a string for emission through the printer.
+    /// Code blocks with language tags get syntax highlighting via syntect.
     fn render_markdown_to_string(text: &str) -> String {
         if text.trim().is_empty() {
             return String::new();
         }
+        let highlighted = highlight::highlight_code_blocks(text);
         let skin = MadSkin::default();
-        format!("{}", skin.term_text(text))
+        format!("{}", skin.term_text(&highlighted))
     }
 
     /// Emit a line of output through the ExternalPrinter (readline-safe) if

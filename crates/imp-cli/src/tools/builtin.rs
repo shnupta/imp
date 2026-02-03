@@ -49,8 +49,53 @@ async fn file_read(arguments: &Value) -> Result<String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| ImpError::Tool("Missing 'path' parameter".to_string()))?;
 
-    fs::read_to_string(path)
-        .map_err(|e| ImpError::Tool(format!("Failed to read file '{}': {}", path, e)))
+    let content = fs::read_to_string(path)
+        .map_err(|e| ImpError::Tool(format!("Failed to read file '{}': {}", path, e)))?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+
+    // Parse optional offset (1-indexed line number) and limit
+    let offset = arguments
+        .get("offset")
+        .and_then(|v| v.as_u64())
+        .map(|v| v.max(1) as usize)
+        .unwrap_or(1);
+
+    let limit = arguments
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+
+    let start_idx = (offset - 1).min(total_lines);
+    let end_idx = match limit {
+        Some(lim) => (start_idx + lim).min(total_lines),
+        None => total_lines,
+    };
+
+    let selected = &lines[start_idx..end_idx];
+
+    // Format with line numbers
+    let mut output = String::new();
+    for (i, line) in selected.iter().enumerate() {
+        let line_num = start_idx + i + 1;
+        output.push_str(&format!("{:>4} | {}\n", line_num, line));
+    }
+
+    // Add metadata header
+    let range_info = if start_idx == 0 && end_idx == total_lines {
+        format!("{} ({} lines)", path, total_lines)
+    } else {
+        format!(
+            "{} (lines {}-{} of {})",
+            path,
+            start_idx + 1,
+            end_idx,
+            total_lines
+        )
+    };
+
+    Ok(format!("{}\n{}", range_info, output))
 }
 
 async fn file_write(arguments: &Value) -> Result<String> {
@@ -78,11 +123,11 @@ async fn file_edit(arguments: &Value) -> Result<String> {
     let path = arguments.get("path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| ImpError::Tool("Missing 'path' parameter".to_string()))?;
-    
+
     let old_text = arguments.get("old_text")
         .and_then(|v| v.as_str())
         .ok_or_else(|| ImpError::Tool("Missing 'old_text' parameter".to_string()))?;
-    
+
     let new_text = arguments.get("new_text")
         .and_then(|v| v.as_str())
         .ok_or_else(|| ImpError::Tool("Missing 'new_text' parameter".to_string()))?;
@@ -92,14 +137,71 @@ async fn file_edit(arguments: &Value) -> Result<String> {
 
     let occurrences = content.matches(old_text).count();
     if occurrences == 0 {
-        return Err(ImpError::Tool(format!("Text not found in file '{}'", path)));
+        // Help the model debug: show nearby lines if we can find a partial match
+        let first_line = old_text.lines().next().unwrap_or(old_text);
+        let hint = if first_line.len() > 10 {
+            let partial = &first_line[..first_line.len().min(40)];
+            let partial_matches: Vec<usize> = content
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.contains(partial))
+                .map(|(i, _)| i + 1)
+                .collect();
+            if partial_matches.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " Partial match on first line found at line(s): {:?}. Use file_read with offset to check exact content.",
+                    &partial_matches[..partial_matches.len().min(5)]
+                )
+            }
+        } else {
+            String::new()
+        };
+        return Err(ImpError::Tool(format!(
+            "old_text not found in '{}'. Ensure it matches exactly (including whitespace/indentation).{}",
+            path, hint
+        )));
     }
 
-    let updated_content = content.replace(old_text, new_text);
-    fs::write(path, &updated_content)
-        .map_err(|e| ImpError::Tool(format!("Failed to write updated file '{}': {}", path, e)))?;
+    if occurrences > 1 {
+        // Find line numbers of each occurrence to help the model be more specific
+        let mut positions = Vec::new();
+        let mut search_from = 0;
+        for _ in 0..occurrences {
+            if let Some(pos) = content[search_from..].find(old_text) {
+                let abs_pos = search_from + pos;
+                let line_num = content[..abs_pos].matches('\n').count() + 1;
+                positions.push(line_num);
+                search_from = abs_pos + old_text.len();
+            }
+        }
+        return Err(ImpError::Tool(format!(
+            "old_text matches {} locations in '{}' (lines {:?}). Include more surrounding context in old_text to match exactly one location.",
+            occurrences, path, positions
+        )));
+    }
 
-    Ok(format!("Successfully replaced {} occurrence(s) in '{}'", occurrences, path))
+    // Exactly one match — safe to replace
+    let match_pos = content.find(old_text).unwrap();
+    let start_line = content[..match_pos].matches('\n').count() + 1;
+    let old_line_count = old_text.matches('\n').count() + 1;
+    let new_line_count = new_text.matches('\n').count() + 1;
+
+    let updated_content = content.replacen(old_text, new_text, 1);
+    fs::write(path, &updated_content)
+        .map_err(|e| ImpError::Tool(format!("Failed to write file '{}': {}", path, e)))?;
+
+    let total_lines = updated_content.lines().count();
+    Ok(format!(
+        "Replaced lines {}-{} ({} lines → {}) in '{}' ({} total lines)",
+        start_line,
+        start_line + old_line_count - 1,
+        old_line_count,
+        new_line_count,
+        path,
+        total_lines
+    ))
 }
 
 async fn search_code(arguments: &Value) -> Result<String> {

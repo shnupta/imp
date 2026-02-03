@@ -264,7 +264,7 @@ impl ToolRegistry {
         ToolDefinition {
             tool: ToolMeta {
                 name: "file_read".to_string(),
-                description: "Read the contents of a file".to_string(),
+                description: "Read file contents with line numbers. Use offset and limit for large files to avoid reading the entire file. Output is numbered (e.g. '  42 | code here').".to_string(),
                 parameters: {
                     let mut params = HashMap::new();
                     params.insert("path".to_string(), ParameterDef {
@@ -272,6 +272,18 @@ impl ToolRegistry {
                         required: true,
                         default: None,
                         description: Some("Path to the file to read".to_string()),
+                    });
+                    params.insert("offset".to_string(), ParameterDef {
+                        param_type: "integer".to_string(),
+                        required: false,
+                        default: None,
+                        description: Some("Line number to start reading from (1-indexed). Default: 1".to_string()),
+                    });
+                    params.insert("limit".to_string(), ParameterDef {
+                        param_type: "integer".to_string(),
+                        required: false,
+                        default: None,
+                        description: Some("Maximum number of lines to read. Default: entire file".to_string()),
                     });
                     params
                 },
@@ -318,7 +330,7 @@ impl ToolRegistry {
         ToolDefinition {
             tool: ToolMeta {
                 name: "file_edit".to_string(),
-                description: "Edit a file by finding and replacing text".to_string(),
+                description: "Edit a file by replacing exact text. old_text must match exactly one location in the file (including whitespace and indentation). If it matches multiple locations, the edit is rejected — include more surrounding context to be unique. Returns the affected line range.".to_string(),
                 parameters: {
                     let mut params = HashMap::new();
                     params.insert("path".to_string(), ParameterDef {
@@ -331,13 +343,13 @@ impl ToolRegistry {
                         param_type: "string".to_string(),
                         required: true,
                         default: None,
-                        description: Some("Text to find and replace".to_string()),
+                        description: Some("Exact text to find (must match exactly one location, including whitespace)".to_string()),
                     });
                     params.insert("new_text".to_string(), ParameterDef {
                         param_type: "string".to_string(),
                         required: true,
                         default: None,
-                        description: Some("New text to replace with".to_string()),
+                        description: Some("Replacement text".to_string()),
                     });
                     params
                 },

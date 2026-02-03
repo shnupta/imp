@@ -144,7 +144,7 @@ impl Agent {
         }
 
         let mut iteration_count = 0;
-        let max_iterations = 10;
+        let max_iterations = 50;
         let mut turn_tool_count: usize = 0;
 
         while iteration_count < max_iterations {

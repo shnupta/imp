@@ -4,6 +4,7 @@ use console::style;
 use dialoguer::Select;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -19,6 +20,19 @@ enum InputResult {
     Line(String),
     Eof,
     Interrupted,
+}
+
+/// Build the prompt string, showing queue count when items are pending.
+fn make_prompt(queued: usize) -> String {
+    if queued > 0 {
+        format!(
+            "{} {} ",
+            style("You:").bold().green(),
+            style(format!("[{} queued]", queued)).dim()
+        )
+    } else {
+        format!("{} ", style("You:").bold().green())
+    }
 }
 
 pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> Result<()> {
@@ -81,9 +95,6 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
     agent.set_interrupt_flag(interrupted.clone());
 
     // ── Dedicated readline thread ────────────────────────────────────
-    // The thread owns the editor exclusively. We communicate via channels.
-    // This lets us select! between user input and sub-agent completion
-    // without ever having two things reading stdin.
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<InputCommand>();
     let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<InputResult>();
 
@@ -110,6 +121,11 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
         }
     });
 
+    // ── Input queue ──────────────────────────────────────────────────
+    let mut pending_queue: VecDeque<String> = VecDeque::new();
+    let mut multiline_buffer = String::new();
+    let mut readline_pending = false;
+
     // ── Main chat loop ───────────────────────────────────────────────
     'outer: loop {
         // Check for completed sub-agents before prompting
@@ -118,95 +134,114 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
             auto_summarize_subagents(&mut agent, completed).await;
         }
 
-        // Collect multiline input (backslash continuation)
-        let mut full_input = String::new();
-        let mut first_line = true;
+        // ── Phase 1: Get next input (from queue or readline) ─────────
+        let input: String = if let Some(queued) = pending_queue.pop_front() {
+            // Process queued input immediately, no prompting
+            eprintln!(
+                "{}",
+                style(format!(
+                    "▶ Processing queued input{}",
+                    if pending_queue.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({} remaining)", pending_queue.len())
+                    }
+                ))
+                .dim()
+            );
+            queued
+        } else {
+            // Wait for user input (with sub-agent interleaving)
+            'input: loop {
+                // Ensure readline is pending
+                if !readline_pending {
+                    let prompt = if multiline_buffer.is_empty() {
+                        make_prompt(pending_queue.len())
+                    } else {
+                        format!("{}  ", style("...").dim())
+                    };
+                    if cmd_tx.send(InputCommand::Readline(prompt)).is_err() {
+                        break 'outer;
+                    }
+                    readline_pending = true;
+                }
 
-        let input = 'input: loop {
-            let prompt = if first_line {
-                format!("{} ", style("You:").bold().green())
-            } else {
-                format!("{}  ", style("...").dim())
-            };
-
-            // Request a readline from the dedicated thread
-            if cmd_tx.send(InputCommand::Readline(prompt)).is_err() {
-                break 'outer; // Thread died
-            }
-
-            // Wait for input OR sub-agent completion
-            let line = loop {
                 let has_subagents = agent.has_active_subagents();
 
                 if has_subagents {
                     tokio::select! {
                         biased;
-                        // Prefer user input when both are ready
                         result = result_rx.recv() => {
+                            readline_pending = false;
                             match result {
-                                Some(InputResult::Line(line)) => break line,
-                                Some(InputResult::Interrupted) => {
-                                    if full_input.is_empty() && first_line {
-                                        println!("{}", style("(Ctrl+C — type /quit to exit)").dim());
-                                        full_input.clear();
-                                        break 'input String::new();
-                                    } else {
-                                        println!("{}", style("(input cancelled)").dim());
-                                        full_input.clear();
-                                        break 'input String::new();
+                                Some(InputResult::Line(line)) => {
+                                    // Handle multiline continuation
+                                    if line.ends_with('\\') {
+                                        multiline_buffer.push_str(&line[..line.len() - 1]);
+                                        multiline_buffer.push('\n');
+                                        continue 'input;
                                     }
+                                    multiline_buffer.push_str(&line);
+                                    let input = std::mem::take(&mut multiline_buffer);
+                                    let trimmed = input.trim().to_string();
+                                    if trimmed.is_empty() {
+                                        continue 'input;
+                                    }
+                                    let _ = cmd_tx.send(InputCommand::AddHistory(trimmed.clone()));
+                                    break 'input trimmed;
+                                }
+                                Some(InputResult::Interrupted) => {
+                                    if !multiline_buffer.is_empty() {
+                                        multiline_buffer.clear();
+                                        println!("{}", style("(input cancelled)").dim());
+                                    } else {
+                                        println!("{}", style("(Ctrl+C — type /quit to exit)").dim());
+                                    }
+                                    continue 'input;
                                 }
                                 Some(InputResult::Eof) | None => break 'outer,
                             }
                         }
                         completed = agent.wait_for_subagent() => {
-                            // Sub-agent finished! The readline thread is undisturbed.
-                            // Auto-summarize, then loop back to await readline again.
                             auto_summarize_subagents(&mut agent, completed).await;
-                            continue; // Re-enter select!, same readline is still running
+                            continue 'input;
                         }
                     }
                 } else {
-                    // No sub-agents — just await readline normally
                     match result_rx.recv().await {
-                        Some(InputResult::Line(line)) => break line,
-                        Some(InputResult::Interrupted) => {
-                            if full_input.is_empty() && first_line {
-                                println!("{}", style("(Ctrl+C — type /quit to exit)").dim());
-                                full_input.clear();
-                                break 'input String::new();
-                            } else {
-                                println!("{}", style("(input cancelled)").dim());
-                                full_input.clear();
-                                break 'input String::new();
+                        Some(InputResult::Line(line)) => {
+                            readline_pending = false;
+                            if line.ends_with('\\') {
+                                multiline_buffer.push_str(&line[..line.len() - 1]);
+                                multiline_buffer.push('\n');
+                                continue 'input;
                             }
+                            multiline_buffer.push_str(&line);
+                            let input = std::mem::take(&mut multiline_buffer);
+                            let trimmed = input.trim().to_string();
+                            if trimmed.is_empty() {
+                                continue 'input;
+                            }
+                            let _ = cmd_tx.send(InputCommand::AddHistory(trimmed.clone()));
+                            break 'input trimmed;
+                        }
+                        Some(InputResult::Interrupted) => {
+                            readline_pending = false;
+                            if !multiline_buffer.is_empty() {
+                                multiline_buffer.clear();
+                                println!("{}", style("(input cancelled)").dim());
+                            } else {
+                                println!("{}", style("(Ctrl+C — type /quit to exit)").dim());
+                            }
+                            continue 'input;
                         }
                         Some(InputResult::Eof) | None => break 'outer,
                     }
                 }
-            };
-
-            // Multiline: backslash continuation
-            if line.ends_with('\\') {
-                full_input.push_str(&line[..line.len() - 1]);
-                full_input.push('\n');
-                first_line = false;
-            } else {
-                full_input.push_str(&line);
-                break 'input full_input;
             }
         };
 
-        let input = input.trim();
-
-        if input.is_empty() {
-            continue;
-        }
-
-        // Add to history
-        let _ = cmd_tx.send(InputCommand::AddHistory(input.to_string()));
-
-        // Command handling
+        // ── Phase 2: Handle commands ─────────────────────────────────
         match input.to_lowercase().as_str() {
             "/quit" | "/exit" | "/q" | "quit" | "exit" | "bye" | "q" => {
                 let aborted = agent.abort_subagents();
@@ -215,6 +250,14 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
                         "{}",
                         style(format!("⚠️  Aborted {} running sub-agent(s)", aborted)).yellow()
                     );
+                }
+                // Clear any remaining queued inputs
+                if !pending_queue.is_empty() {
+                    println!(
+                        "{}",
+                        style(format!("🗑️  Discarded {} queued input(s)", pending_queue.len())).dim()
+                    );
+                    pending_queue.clear();
                 }
                 agent.write_session_summary();
                 println!("{}", style(agent.usage().format_session_total()).dim());
@@ -248,9 +291,39 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
                 println!("{}", status);
                 continue;
             }
+            "/cancel" => {
+                let count = pending_queue.len();
+                if count > 0 {
+                    pending_queue.clear();
+                    println!(
+                        "{}",
+                        style(format!("🗑️  Cleared {} queued input(s)", count)).yellow()
+                    );
+                } else {
+                    println!("{}", style("No queued inputs to cancel.").dim());
+                }
+                continue;
+            }
+            "/queue" => {
+                if pending_queue.is_empty() {
+                    println!("{}", style("Queue is empty.").dim());
+                } else {
+                    println!(
+                        "{}",
+                        style(format!("📋 {} queued input(s):", pending_queue.len())).bold()
+                    );
+                    for (i, q) in pending_queue.iter().enumerate() {
+                        let preview: String = q.chars().take(70).collect();
+                        let ellipsis = if q.chars().count() > 70 { "…" } else { "" };
+                        println!("  {}. {}{}", i + 1, preview, ellipsis);
+                    }
+                }
+                continue;
+            }
             _ => {}
         }
 
+        // ── Phase 3: Process with agent ──────────────────────────────
         println!(
             "\n{}",
             style(format!("{}:", agent.display_name())).bold().blue()
@@ -268,7 +341,81 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
             }
         });
 
-        match agent.process_message_with_markdown(input).await {
+        // Start readline so user can queue inputs during processing
+        if !readline_pending {
+            let prompt = make_prompt(pending_queue.len());
+            if cmd_tx.send(InputCommand::Readline(prompt)).is_ok() {
+                readline_pending = true;
+            }
+        }
+
+        // Process the message, collecting any inputs that arrive during processing
+        let mut agent_fut = std::pin::pin!(agent.process_message_with_markdown(&input));
+
+        let result = loop {
+            tokio::select! {
+                biased;
+                res = &mut agent_fut => break res,
+                input_res = result_rx.recv(), if readline_pending => {
+                    readline_pending = false;
+                    match input_res {
+                        Some(InputResult::Line(line)) => {
+                            let trimmed = line.trim().to_string();
+                            if trimmed.eq_ignore_ascii_case("/cancel") {
+                                let count = pending_queue.len();
+                                if count > 0 {
+                                    pending_queue.clear();
+                                    eprintln!(
+                                        "\n{}",
+                                        style(format!("🗑️  Cleared {} queued input(s)", count))
+                                            .yellow()
+                                    );
+                                }
+                            } else if trimmed.eq_ignore_ascii_case("/stop")
+                                || trimmed.eq_ignore_ascii_case("/interrupt")
+                            {
+                                interrupted.store(true, Ordering::SeqCst);
+                                eprintln!("\n{}", style("⚡ Interrupting…").yellow());
+                            } else if !trimmed.is_empty() {
+                                pending_queue.push_back(trimmed.clone());
+                                let _ = cmd_tx.send(InputCommand::AddHistory(trimmed));
+                                eprintln!(
+                                    "{}",
+                                    style(format!(
+                                        "📥 Queued ({} pending)",
+                                        pending_queue.len()
+                                    ))
+                                    .dim()
+                                );
+                            }
+                            // Re-prompt immediately
+                            let prompt = make_prompt(pending_queue.len());
+                            if cmd_tx.send(InputCommand::Readline(prompt)).is_ok() {
+                                readline_pending = true;
+                            }
+                        }
+                        Some(InputResult::Interrupted) => {
+                            // Ctrl+C during processing — interrupt the agent
+                            interrupted.store(true, Ordering::SeqCst);
+                            let prompt = make_prompt(pending_queue.len());
+                            if cmd_tx.send(InputCommand::Readline(prompt)).is_ok() {
+                                readline_pending = true;
+                            }
+                        }
+                        Some(InputResult::Eof) | None => {
+                            // Let agent finish, then exit
+                            let res = (&mut agent_fut).await;
+                            let _ = res; // discard
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        };
+
+        ctrlc_handler.abort();
+
+        match result {
             Ok(_) => {
                 println!("{}", style("─".repeat(50)).dim());
                 println!();
@@ -277,17 +424,13 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
                 let msg = e.to_string();
                 if msg.contains("interrupted") {
                     println!("\n{}", style("⚡ Interrupted").yellow());
-                    println!("{}", style("─".repeat(50)).dim());
-                    println!();
                 } else {
                     println!("{}", style(format!("❌ Error: {}", e)).red());
-                    println!("{}", style("─".repeat(50)).dim());
-                    println!();
                 }
+                println!("{}", style("─".repeat(50)).dim());
+                println!();
             }
         }
-
-        ctrlc_handler.abort();
     }
 
     // Clean shutdown
@@ -295,7 +438,7 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
     Ok(())
 }
 
-/// Auto-summarize completed sub-agent results.
+/// Auto-summarize completed sub-agent results with markdown rendering.
 async fn auto_summarize_subagents(agent: &mut Agent, completed: Vec<crate::subagent::SubAgentResult>) {
     let results_text = completed
         .iter()
@@ -321,9 +464,9 @@ async fn auto_summarize_subagents(agent: &mut Agent, completed: Vec<crate::subag
     );
     println!("{}", style("─".repeat(20)).dim());
 
-    match agent.process_message(&synthetic_msg, true).await {
+    match agent.process_message_with_markdown(&synthetic_msg).await {
         Ok(_) => {
-            println!("\n{}", style("─".repeat(50)).dim());
+            println!("{}", style("─".repeat(50)).dim());
             println!();
         }
         Err(e) => {
@@ -358,9 +501,14 @@ fn maybe_show_session_picker(agent: &mut Agent) -> Result<()> {
     for s in &sessions {
         let short_id = &s.id[..s.id.len().min(8)];
         let age = format_relative_time(&s.updated_at);
+        let display_name = s
+            .title
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .unwrap_or(short_id);
         items.push(format!(
-            "🔄 {} — {} messages ({})",
-            short_id, s.message_count, age
+            "🔄 {} — {} msgs ({})",
+            display_name, s.message_count, age
         ));
     }
     items.push("✨ Start new session".to_string());
@@ -432,12 +580,19 @@ fn show_help() {
     println!("  {}       — Manually compact conversation", style("/compact").cyan());
     println!("  {}       — Show session info", style("/session").cyan());
     println!("  {}        — Show sub-agent status", style("/agents").cyan());
+    println!("  {}         — Show queued inputs", style("/queue").cyan());
+    println!("  {}        — Cancel all queued inputs", style("/cancel").cyan());
     println!("  {}          — Show this help", style("/help").cyan());
     println!();
     println!("{}", style("Input:").bold());
     println!("  {}      — Multiline input (backslash at end of line)", style("line \\").cyan());
     println!("  {}        — Interrupt current agent action", style("Ctrl+C").cyan());
     println!("  {}        — Exit chat", style("Ctrl+D").cyan());
+    println!();
+    println!("{}", style("Input Queue:").bold());
+    println!("  While the agent is working, you can type more messages.");
+    println!("  They'll be queued and processed in order when the agent is free.");
+    println!("  Use {} or {} during processing to interrupt.", style("/stop").cyan(), style("Ctrl+C").cyan());
 }
 
 fn show_session_info(agent: &Agent) {

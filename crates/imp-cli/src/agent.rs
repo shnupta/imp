@@ -10,12 +10,19 @@ use crate::tools::ToolRegistry;
 use crate::usage::UsageTracker;
 use chrono::Local;
 use console::style;
+use rustyline::ExternalPrinter as RustylineExternalPrinter;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use termimad::*;
+
+/// Shared handle to a rustyline ExternalPrinter for output that doesn't garble
+/// the readline prompt. When the printer is set, all agent output routes through
+/// it; otherwise falls back to regular stdout.
+pub type SharedPrinter = Arc<Mutex<Box<dyn RustylineExternalPrinter + Send>>>;
 
 /// When false, `maybe_distill_insights` is a no-op. Users have `imp reflect`
 /// for proper distillation; the automatic version was too noisy.
@@ -37,17 +44,24 @@ pub struct Agent {
     sub_agents: Vec<SubAgentHandle>,
     /// Shared flag for Ctrl+C interrupt support.
     interrupt_flag: Option<Arc<AtomicBool>>,
+    /// External printer for readline-safe output.
+    printer: Option<SharedPrinter>,
 }
 
 impl Agent {
-    /// Render markdown text nicely in the terminal
-    fn render_markdown(text: &str) {
+    /// Render markdown text to a string for emission through the printer.
+    fn render_markdown_to_string(text: &str) -> String {
         if text.trim().is_empty() {
-            return;
+            return String::new();
         }
-        
         let skin = MadSkin::default();
-        let _ = skin.print_text(text);
+        format!("{}", skin.term_text(text))
+    }
+
+    /// Emit a line of output through the ExternalPrinter (readline-safe) if
+    /// available, otherwise fall back to stdout.
+    pub fn emit(&self, msg: impl std::fmt::Display) {
+        emit_line(&self.printer, msg);
     }
 
     /// Create an agent. Automatically detects the project from cwd and loads
@@ -90,6 +104,7 @@ impl Agent {
             session_id,
             sub_agents: Vec::new(),
             interrupt_flag: None,
+            printer: None,
         })
     }
 
@@ -104,6 +119,11 @@ impl Agent {
     /// The agent's display name, parsed from IDENTITY.md. Falls back to "Imp".
     pub fn display_name(&self) -> String {
         self.context.agent_name().unwrap_or_else(|| "Imp".to_string())
+    }
+
+    /// Set the shared ExternalPrinter for readline-safe output.
+    pub fn set_printer(&mut self, printer: SharedPrinter) {
+        self.printer = Some(printer);
     }
 
     pub async fn process_message(&mut self, user_message: &str, stream: bool) -> Result<String> {
@@ -123,8 +143,7 @@ impl Agent {
                 .map(|r| r.format_report())
                 .collect::<Vec<_>>()
                 .join("\n---\n");
-            eprintln!(
-                "{}",
+            self.emit(
                 style(format!("📬 {} sub-agent(s) completed", completed.len())).yellow()
             );
             format!(
@@ -145,7 +164,7 @@ impl Agent {
             &serde_json::Value::String(effective_message.clone()),
             0,
         ) {
-            eprintln!("{}", style(format!("⚠ DB write failed: {}", e)).dim());
+            self.emit(style(format!("⚠ DB write failed: {}", e)).dim());
         }
 
         let mut iteration_count = 0;
@@ -168,8 +187,7 @@ impl Agent {
             // Show thinking indicator for non-streaming mode
             let show_thinking = !stream && self.config.thinking.enabled;
             if show_thinking {
-                eprint!("{}", style("💭 Thinking...").dim());
-                let _ = std::io::stderr().flush();
+                self.emit(style("💭 Thinking...").dim());
             }
 
             let response = self
@@ -178,13 +196,13 @@ impl Agent {
                 .await?;
 
             if show_thinking {
-                eprintln!(" {}", style("done").dim());
+                // No "done" message needed — the response output is the indication
             }
 
             // Record and display token usage
             if let Some(ref usage) = response.usage {
                 self.usage.record(usage.input_tokens, usage.output_tokens);
-                eprintln!("{}", style(UsageTracker::format_response_usage(usage.input_tokens, usage.output_tokens)).dim());
+                self.emit(style(UsageTracker::format_response_usage(usage.input_tokens, usage.output_tokens)).dim());
             }
 
             let text_content = self.client.extract_text_content(&response);
@@ -202,19 +220,22 @@ impl Agent {
                     &assistant_content,
                     tool_calls.len(),
                 ) {
-                    eprintln!("{}", style(format!("⚠ DB write failed: {}", e)).dim());
+                    self.emit(style(format!("⚠ DB write failed: {}", e)).dim());
                 }
             }
 
             if tool_calls.is_empty() {
                 if render_markdown && !stream {
-                    Self::render_markdown(&text_content);
+                    let rendered = Self::render_markdown_to_string(&text_content);
+                    if !rendered.is_empty() {
+                        self.emit(rendered.trim_end());
+                    }
                 }
                 // Auto-generate session title after the first exchange
                 if self.messages.len() <= 2 {
                     let title = generate_session_title(user_message);
                     if let Err(e) = self.db.update_session_title(&self.session_id, &title) {
-                        eprintln!("{}", style(format!("⚠ Failed to set session title: {}", e)).dim());
+                        self.emit(style(format!("⚠ Failed to set session title: {}", e)).dim());
                     }
                 }
                 // Distill structured insights from this turn
@@ -231,8 +252,7 @@ impl Agent {
                     return Err(ImpError::Agent("interrupted".to_string()));
                 }
 
-                println!(
-                    "{}",
+                self.emit(
                     style(format_tool_call(&tool_call.name, &tool_call.input)).dim()
                 );
 
@@ -269,9 +289,9 @@ impl Agent {
                 tool_results.push(anthropic_result);
 
                 if let Some(ref error) = result.error {
-                    println!("{}", style(format!("❌ Tool error: {}", error)).red());
+                    self.emit(style(format!("❌ Tool error: {}", error)).red());
                 } else {
-                    println!("{}", style("✅ Tool completed successfully").green());
+                    self.emit(style("✅ Tool completed successfully").green());
                 }
             }
 
@@ -285,7 +305,7 @@ impl Agent {
                     &tool_msg.content,
                     0,
                 ) {
-                    eprintln!("{}", style(format!("⚠ DB write failed: {}", e)).dim());
+                    self.emit(style(format!("⚠ DB write failed: {}", e)).dim());
                 }
                 self.messages.push(tool_msg);
             }
@@ -431,8 +451,7 @@ impl Agent {
             handle.task.clone()
         };
 
-        eprintln!(
-            "{}",
+        self.emit(
             style(format!("🚀 Sub-agent #{} spawned", id)).yellow()
         );
 
@@ -621,6 +640,20 @@ impl Agent {
             eprintln!("{}", style(format!("⚠ Memory write failed: {}", e)).dim());
         }
     }
+}
+
+/// Emit a line of output through the ExternalPrinter (readline-safe) if
+/// available, otherwise fall back to stdout. Public so chat.rs can use it too.
+pub fn emit_line(printer: &Option<SharedPrinter>, msg: impl std::fmt::Display) {
+    let text = format!("{}\n", msg);
+    if let Some(ref p) = printer {
+        if let Ok(mut guard) = p.lock() {
+            let _ = guard.print(text);
+            return;
+        }
+    }
+    print!("{}", text);
+    let _ = std::io::stdout().flush();
 }
 
 /// Generate a session title from the first user message.

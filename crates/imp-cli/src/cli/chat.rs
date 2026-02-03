@@ -1,11 +1,11 @@
-use crate::agent::Agent;
+use crate::agent::{Agent, SharedPrinter, emit_line};
 use crate::error::Result;
 use console::style;
 use dialoguer::Select;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Commands sent from the main loop to the dedicated readline thread.
@@ -97,9 +97,19 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
     // ── Dedicated readline thread ────────────────────────────────────
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<InputCommand>();
     let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<InputResult>();
+    let (printer_tx, printer_rx) = std::sync::mpsc::sync_channel::<Option<Box<dyn rustyline::ExternalPrinter + Send>>>(1);
 
     std::thread::spawn(move || {
         let mut editor = DefaultEditor::new().expect("Failed to initialize line editor");
+
+        // Create an ExternalPrinter and send it to the main thread.
+        // This lets the main thread print output without garbling the prompt.
+        let printer: Option<Box<dyn rustyline::ExternalPrinter + Send>> = editor
+            .create_external_printer()
+            .ok()
+            .map(|p| Box::new(p) as Box<dyn rustyline::ExternalPrinter + Send>);
+        let _ = printer_tx.send(printer);
+
         while let Ok(cmd) = cmd_rx.recv() {
             match cmd {
                 InputCommand::Readline(prompt) => {
@@ -126,6 +136,16 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
     let mut multiline_buffer = String::new();
     let mut readline_pending = false;
 
+    // ── External printer for readline-safe output ────────────────────
+    let printer: Option<SharedPrinter> = printer_rx
+        .recv()
+        .ok()
+        .flatten()
+        .map(|p| Arc::new(Mutex::new(p)));
+    if let Some(ref p) = printer {
+        agent.set_printer(p.clone());
+    }
+
     // ── Main chat loop ───────────────────────────────────────────────
     'outer: loop {
         // Check for completed sub-agents before prompting
@@ -137,8 +157,8 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
         // ── Phase 1: Get next input (from queue or readline) ─────────
         let input: String = if let Some(queued) = pending_queue.pop_front() {
             // Process queued input immediately, no prompting
-            eprintln!(
-                "{}",
+            emit_line(
+                &printer,
                 style(format!(
                     "▶ Processing queued input{}",
                     if pending_queue.is_empty() {
@@ -324,11 +344,11 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
         }
 
         // ── Phase 3: Process with agent ──────────────────────────────
-        println!(
-            "\n{}",
-            style(format!("{}:", agent.display_name())).bold().blue()
+        emit_line(
+            &printer,
+            format!("\n{}", style(format!("{}:", agent.display_name())).bold().blue())
         );
-        println!("{}", style("─".repeat(20)).dim());
+        emit_line(&printer, style("─".repeat(20)).dim());
 
         // Clear interrupt flag before agent work
         interrupted.store(false, Ordering::SeqCst);
@@ -365,8 +385,8 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
                                 let count = pending_queue.len();
                                 if count > 0 {
                                     pending_queue.clear();
-                                    eprintln!(
-                                        "\n{}",
+                                    emit_line(
+                                        &printer,
                                         style(format!("🗑️  Cleared {} queued input(s)", count))
                                             .yellow()
                                     );
@@ -375,12 +395,12 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
                                 || trimmed.eq_ignore_ascii_case("/interrupt")
                             {
                                 interrupted.store(true, Ordering::SeqCst);
-                                eprintln!("\n{}", style("⚡ Interrupting…").yellow());
+                                emit_line(&printer, style("⚡ Interrupting…").yellow());
                             } else if !trimmed.is_empty() {
                                 pending_queue.push_back(trimmed.clone());
                                 let _ = cmd_tx.send(InputCommand::AddHistory(trimmed));
-                                eprintln!(
-                                    "{}",
+                                emit_line(
+                                    &printer,
                                     style(format!(
                                         "📥 Queued ({} pending)",
                                         pending_queue.len()
@@ -417,18 +437,18 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
 
         match result {
             Ok(_) => {
-                println!("{}", style("─".repeat(50)).dim());
-                println!();
+                emit_line(&printer, style("─".repeat(50)).dim());
+                emit_line(&printer, "");
             }
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("interrupted") {
-                    println!("\n{}", style("⚡ Interrupted").yellow());
+                    emit_line(&printer, style("⚡ Interrupted").yellow());
                 } else {
-                    println!("{}", style(format!("❌ Error: {}", e)).red());
+                    emit_line(&printer, style(format!("❌ Error: {}", e)).red());
                 }
-                println!("{}", style("─".repeat(50)).dim());
-                println!();
+                emit_line(&printer, style("─".repeat(50)).dim());
+                emit_line(&printer, "");
             }
         }
     }
@@ -446,8 +466,7 @@ async fn auto_summarize_subagents(agent: &mut Agent, completed: Vec<crate::subag
         .collect::<Vec<_>>()
         .join("\n---\n");
 
-    eprintln!(
-        "\n{}",
+    agent.emit(
         style(format!("📬 {} sub-agent(s) completed", completed.len())).yellow()
     );
 
@@ -458,19 +477,18 @@ async fn auto_summarize_subagents(agent: &mut Agent, completed: Vec<crate::subag
         results_text
     );
 
-    println!(
-        "\n{}",
-        style(format!("{}:", agent.display_name())).bold().blue()
+    agent.emit(
+        format!("\n{}", style(format!("{}:", agent.display_name())).bold().blue())
     );
-    println!("{}", style("─".repeat(20)).dim());
+    agent.emit(style("─".repeat(20)).dim());
 
     match agent.process_message_with_markdown(&synthetic_msg).await {
         Ok(_) => {
-            println!("{}", style("─".repeat(50)).dim());
-            println!();
+            agent.emit(style("─".repeat(50)).dim());
+            agent.emit("");
         }
         Err(e) => {
-            eprintln!("{}", style(format!("⚠ Failed to summarize: {}", e)).dim());
+            agent.emit(style(format!("⚠ Failed to summarize: {}", e)).dim());
         }
     }
 }

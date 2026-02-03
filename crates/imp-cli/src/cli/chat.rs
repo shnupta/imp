@@ -7,6 +7,20 @@ use rustyline::DefaultEditor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Commands sent from the main loop to the dedicated readline thread.
+enum InputCommand {
+    Readline(String), // prompt
+    AddHistory(String),
+    Shutdown,
+}
+
+/// Results sent from the readline thread back to the main loop.
+enum InputResult {
+    Line(String),
+    Eof,
+    Interrupted,
+}
+
 pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> Result<()> {
     let mut agent = Agent::new().await?;
 
@@ -17,7 +31,6 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
             "{}",
             style(format!("🔄 Resumed session: {}", &sid[..sid.len().min(8)])).yellow()
         );
-    // --continue: auto-resume the most recent session for this project
     } else if continue_last {
         let project = agent.project_name().map(|s| s.to_string());
         if let Some(info) = agent.db().get_latest_session(project.as_deref())? {
@@ -34,11 +47,9 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
         } else {
             println!("{}", style("No previous session found — starting fresh.").dim());
         }
-    // --resume: show interactive session picker
     } else if resume {
         maybe_show_session_picker(&mut agent)?;
     }
-    // bare `imp chat`: start fresh (no picker)
 
     println!(
         "{}",
@@ -49,7 +60,6 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
     println!("Type /help for commands, Ctrl+C to interrupt, Ctrl+D to exit.");
     println!("{}", style("─".repeat(50)).dim());
 
-    // Print session ID (first 8 chars)
     let short_id = &agent.session_id()[..agent.session_id().len().min(8)];
     println!("{}", style(format!("📎 Session: {}", short_id)).dim());
 
@@ -66,126 +76,137 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
     }
     println!();
 
-    // Ctrl+C interrupt flag — shared between signal handler and agent loop
+    // Ctrl+C interrupt flag for agent work
     let interrupted = Arc::new(AtomicBool::new(false));
     agent.set_interrupt_flag(interrupted.clone());
 
-    // Set up rustyline editor for input with history
-    let mut rl = DefaultEditor::new().expect("Failed to initialize line editor");
+    // ── Dedicated readline thread ────────────────────────────────────
+    // The thread owns the editor exclusively. We communicate via channels.
+    // This lets us select! between user input and sub-agent completion
+    // without ever having two things reading stdin.
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<InputCommand>();
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<InputResult>();
 
-    // Shared flag: background watcher sets this when a sub-agent completes.
-    // Allows us to print a notification to stderr without touching stdin.
-    let subagent_done = Arc::new(AtomicBool::new(false));
+    std::thread::spawn(move || {
+        let mut editor = DefaultEditor::new().expect("Failed to initialize line editor");
+        while let Ok(cmd) = cmd_rx.recv() {
+            match cmd {
+                InputCommand::Readline(prompt) => {
+                    let result = match editor.readline(&prompt) {
+                        Ok(line) => InputResult::Line(line),
+                        Err(ReadlineError::Interrupted) => InputResult::Interrupted,
+                        Err(ReadlineError::Eof) => InputResult::Eof,
+                        Err(_) => InputResult::Eof,
+                    };
+                    if result_tx.send(result).is_err() {
+                        break;
+                    }
+                }
+                InputCommand::AddHistory(entry) => {
+                    let _ = editor.add_history_entry(&entry);
+                }
+                InputCommand::Shutdown => break,
+            }
+        }
+    });
 
-    loop {
-        // Before prompting, check for completed sub-agents and auto-summarize
+    // ── Main chat loop ───────────────────────────────────────────────
+    'outer: loop {
+        // Check for completed sub-agents before prompting
         let completed = agent.collect_completed_subagents().await;
         if !completed.is_empty() {
             auto_summarize_subagents(&mut agent, completed).await;
         }
 
-        // Start a background sub-agent watcher if any are active.
-        // This ONLY prints to stderr — never touches stdin.
-        let watcher_handle = if agent.has_active_subagents() {
-            let done_flag = subagent_done.clone();
-            done_flag.store(false, Ordering::SeqCst);
-            Some(tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    // We check a simple flag; the actual handle check happens in the main loop
-                    // This is just a timer that fires a notification
-                    if !done_flag.load(Ordering::SeqCst) {
-                        done_flag.store(true, Ordering::SeqCst);
-                        // Print notification to stderr — safe while readline is active.
-                        // Rustyline redraws the prompt on the next keypress.
-                        eprintln!(
-                            "\n{}",
-                            style("📬 Sub-agent work may be done — press Enter to see results").yellow()
-                        );
-                    }
-                    break;
-                }
-            }))
-        } else {
-            None
-        };
-
-        // Multiline input: lines ending with \ continue on the next line
+        // Collect multiline input (backslash continuation)
         let mut full_input = String::new();
         let mut first_line = true;
-        loop {
+
+        let input = 'input: loop {
             let prompt = if first_line {
                 format!("{} ", style("You:").bold().green())
             } else {
                 format!("{}  ", style("...").dim())
             };
 
-            // Clear interrupt flag before readline
-            interrupted.store(false, Ordering::SeqCst);
-
-            let readline = rl.readline(&prompt);
-            match readline {
-                Ok(line) => {
-                    if line.ends_with('\\') {
-                        // Continuation: strip trailing backslash, add newline
-                        full_input.push_str(&line[..line.len() - 1]);
-                        full_input.push('\n');
-                        first_line = false;
-                    } else {
-                        full_input.push_str(&line);
-                        break;
-                    }
-                }
-                Err(ReadlineError::Interrupted) => {
-                    if full_input.is_empty() && first_line {
-                        // Ctrl+C on empty prompt — just show a hint
-                        println!("{}", style("(Ctrl+C — type /quit to exit)").dim());
-                        full_input.clear();
-                        break;
-                    } else {
-                        // Ctrl+C during multiline — cancel the input
-                        println!("{}", style("(input cancelled)").dim());
-                        full_input.clear();
-                        break;
-                    }
-                }
-                Err(ReadlineError::Eof) => {
-                    // Ctrl+D — exit
-                    full_input = "\x04".to_string();
-                    break;
-                }
-                Err(_) => {
-                    full_input = "\x04".to_string();
-                    break;
-                }
+            // Request a readline from the dedicated thread
+            if cmd_tx.send(InputCommand::Readline(prompt)).is_err() {
+                break 'outer; // Thread died
             }
-        }
 
-        // Kill the background watcher if it's still running
-        if let Some(handle) = watcher_handle {
-            handle.abort();
-        }
+            // Wait for input OR sub-agent completion
+            let line = loop {
+                let has_subagents = agent.has_active_subagents();
 
-        // Handle Ctrl+D
-        if full_input == "\x04" {
-            break;
-        }
+                if has_subagents {
+                    tokio::select! {
+                        biased;
+                        // Prefer user input when both are ready
+                        result = result_rx.recv() => {
+                            match result {
+                                Some(InputResult::Line(line)) => break line,
+                                Some(InputResult::Interrupted) => {
+                                    if full_input.is_empty() && first_line {
+                                        println!("{}", style("(Ctrl+C — type /quit to exit)").dim());
+                                        full_input.clear();
+                                        break 'input String::new();
+                                    } else {
+                                        println!("{}", style("(input cancelled)").dim());
+                                        full_input.clear();
+                                        break 'input String::new();
+                                    }
+                                }
+                                Some(InputResult::Eof) | None => break 'outer,
+                            }
+                        }
+                        completed = agent.wait_for_subagent() => {
+                            // Sub-agent finished! The readline thread is undisturbed.
+                            // Auto-summarize, then loop back to await readline again.
+                            auto_summarize_subagents(&mut agent, completed).await;
+                            continue; // Re-enter select!, same readline is still running
+                        }
+                    }
+                } else {
+                    // No sub-agents — just await readline normally
+                    match result_rx.recv().await {
+                        Some(InputResult::Line(line)) => break line,
+                        Some(InputResult::Interrupted) => {
+                            if full_input.is_empty() && first_line {
+                                println!("{}", style("(Ctrl+C — type /quit to exit)").dim());
+                                full_input.clear();
+                                break 'input String::new();
+                            } else {
+                                println!("{}", style("(input cancelled)").dim());
+                                full_input.clear();
+                                break 'input String::new();
+                            }
+                        }
+                        Some(InputResult::Eof) | None => break 'outer,
+                    }
+                }
+            };
 
-        let input = full_input.trim();
+            // Multiline: backslash continuation
+            if line.ends_with('\\') {
+                full_input.push_str(&line[..line.len() - 1]);
+                full_input.push('\n');
+                first_line = false;
+            } else {
+                full_input.push_str(&line);
+                break 'input full_input;
+            }
+        };
 
-        // Empty input: check for sub-agent completions (user pressed Enter after notification)
+        let input = input.trim();
+
         if input.is_empty() {
-            let completed = agent.collect_completed_subagents().await;
-            if !completed.is_empty() {
-                auto_summarize_subagents(&mut agent, completed).await;
-            }
             continue;
         }
 
         // Add to history
-        let _ = rl.add_history_entry(input);
+        let _ = cmd_tx.send(InputCommand::AddHistory(input.to_string()));
 
-        // Command handling (/ prefix and bare words for backward compat)
+        // Command handling
         match input.to_lowercase().as_str() {
             "/quit" | "/exit" | "/q" | "quit" | "exit" | "bye" | "q" => {
                 let aborted = agent.abort_subagents();
@@ -239,7 +260,7 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
         // Clear interrupt flag before agent work
         interrupted.store(false, Ordering::SeqCst);
 
-        // Set up Ctrl+C handler for interrupting agent work
+        // Ctrl+C handler for interrupting agent work
         let int_flag = interrupted.clone();
         let ctrlc_handler = tokio::spawn(async move {
             if let Ok(()) = tokio::signal::ctrl_c().await {
@@ -266,10 +287,11 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
             }
         }
 
-        // Cancel the Ctrl+C handler so it doesn't interfere with readline
         ctrlc_handler.abort();
     }
 
+    // Clean shutdown
+    let _ = cmd_tx.send(InputCommand::Shutdown);
     Ok(())
 }
 
@@ -283,10 +305,9 @@ async fn auto_summarize_subagents(agent: &mut Agent, completed: Vec<crate::subag
 
     eprintln!(
         "\n{}",
-        style(format!("📬 {} sub-agent(s) completed — generating summary...", completed.len())).yellow()
+        style(format!("📬 {} sub-agent(s) completed", completed.len())).yellow()
     );
 
-    // Auto-trigger agent response with sub-agent results
     let synthetic_msg = format!(
         "[Sub-agent results — {} task(s) completed]\n\n{}\n\n\
         Summarize what the sub-agent accomplished. Be concise.",
@@ -311,11 +332,10 @@ async fn auto_summarize_subagents(agent: &mut Agent, completed: Vec<crate::subag
     }
 }
 
-/// Show an interactive session picker if previous sessions exist for this project.
 fn maybe_show_session_picker(agent: &mut Agent) -> Result<()> {
     let project_name = match agent.project_name() {
         Some(name) => name.to_string(),
-        None => return Ok(()), // No project detected, skip picker
+        None => return Ok(()),
     };
 
     let current_session_id = agent.session_id().to_string();
@@ -324,7 +344,7 @@ fn maybe_show_session_picker(agent: &mut Agent) -> Result<()> {
         .list_sessions_for_project(&project_name, &current_session_id, 5)?;
 
     if sessions.is_empty() {
-        return Ok(()); // No previous sessions, continue with new
+        return Ok(());
     }
 
     println!(
@@ -334,7 +354,6 @@ fn maybe_show_session_picker(agent: &mut Agent) -> Result<()> {
     println!("{}", style("📎 New session").dim());
     println!();
 
-    // Build picker items
     let mut items: Vec<String> = Vec::new();
     for s in &sessions {
         let short_id = &s.id[..s.id.len().min(8)];
@@ -346,18 +365,17 @@ fn maybe_show_session_picker(agent: &mut Agent) -> Result<()> {
     }
     items.push("✨ Start new session".to_string());
 
-    let default = items.len() - 1; // Default to "new session"
+    let default = items.len() - 1;
 
     let selection = Select::new()
         .with_prompt("Recent sessions")
         .items(&items)
         .default(default)
         .interact_opt()
-        .unwrap_or(Some(default)); // On error, default to new session
+        .unwrap_or(Some(default));
 
     match selection {
         Some(idx) if idx < sessions.len() => {
-            // User picked a previous session
             let chosen = &sessions[idx];
             agent.resume(&chosen.id)?;
             println!(
@@ -370,15 +388,12 @@ fn maybe_show_session_picker(agent: &mut Agent) -> Result<()> {
                 .yellow()
             );
         }
-        _ => {
-            // New session (or cancelled)
-        }
+        _ => {}
     }
 
     Ok(())
 }
 
-/// Format an RFC3339 timestamp as a human-friendly relative time string.
 fn format_relative_time(rfc3339: &str) -> String {
     let Ok(ts) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
         return rfc3339.to_string();

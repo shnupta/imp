@@ -549,6 +549,23 @@ impl Agent {
         self.sub_agents.iter().map(|h| h.id).collect()
     }
 
+    /// Wait until at least one sub-agent completes. Returns the completed results.
+    /// If no sub-agents are active, returns an empty vec immediately.
+    pub async fn wait_for_subagent(&mut self) -> Vec<SubAgentResult> {
+        if self.sub_agents.is_empty() {
+            return Vec::new();
+        }
+
+        // Poll every 500ms until something finishes
+        loop {
+            let any_finished = self.sub_agents.iter().any(|h| h.handle.is_finished());
+            if any_finished {
+                return self.collect_completed_subagents().await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
     /// Set the interrupt flag (shared with Ctrl+C signal handler).
     pub fn set_interrupt_flag(&mut self, flag: Arc<AtomicBool>) {
         self.interrupt_flag = Some(flag);

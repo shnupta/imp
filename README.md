@@ -1,200 +1,249 @@
 # Imp
 
-A Rust-based AI agent CLI for engineering teams. Each team member gets their own agent with a unique identity, personalized context, and shared team knowledge.
+A personal AI agent CLI built in Rust. Imp lives on your machine, remembers your projects, learns your preferences, and works alongside you in the terminal.
 
 ## What is Imp?
 
-Imp is an AI agent that acts as both a **coding partner** and **work organizer**. It:
+Imp is an AI agent that acts as a **coding partner** and **personal assistant**. It:
 
-- Loads context from markdown files to understand your project and team
-- Uses tools to interact with your codebase (read/write files, run commands, search code)
+- Maintains persistent memory across sessions (daily notes + long-term knowledge)
+- Uses tools to interact with your codebase — read, write, edit, search, run commands
+- Spawns sub-agents for parallel background tasks
+- Supports MCP servers for extensible tool integration (GitHub, databases, etc.)
+- Understands your project context — git status, language, structure, conventions
+- Reflects on interactions to learn and improve over time
 - Calls Claude (Anthropic) for intelligent responses and task execution
-- Provides both one-shot commands and interactive chat sessions
 
 ## Installation
 
 ### Prerequisites
 
-- Rust (install from [rustup.rs](https://rustup.rs/))
-- **Authentication**:
-  - Install Claude Code CLI from [claude.ai/code](https://claude.ai/code)
-  - Run `claude setup-token` to get your authentication token
-- Optional: `ripgrep` for better code search (install via your package manager or [GitHub](https://github.com/BurntSushi/ripgrep))
+- **Rust** — install from [rustup.rs](https://rustup.rs/)
+- **Authentication** — install [Claude Code CLI](https://claude.ai/code) and run `claude setup-token`
+- **Optional**: `ripgrep` for faster code search
 
-**System Requirements:**
-- Unix-like OS (Linux, macOS) or Windows with WSL
-- Git (for project detection)
-- Standard shell utilities (ls, grep, etc.)
-
-### Build and Install from source
+### Build from Source
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/shnupta/imp.git
 cd imp
 cargo build --release
-
-# Install to your PATH for system-wide access
-cargo install --path .
+cargo install --path crates/imp-cli
 ```
 
-After installation, `imp` will be available from anywhere in your terminal.
+## Quick Start
+
+```bash
+# First-time setup — creates your agent's identity, personality, and config
+imp bootstrap
+
+# Start an interactive chat
+imp chat
+
+# Ask a one-shot question
+imp ask "What files are in this project?"
+
+# Resume a previous session
+imp chat --resume
+
+# Continue the last session
+imp chat --continue
+```
 
 ## Authentication
 
-Imp uses Anthropic tokens for authentication. The setup is simple:
+Imp uses Anthropic tokens. Run `claude setup-token` to get yours.
 
-### Get Your Token
-1. **Install Claude Code CLI**: Visit [claude.ai/code](https://claude.ai/code) and install the CLI
-2. **Get your token**: Run `claude setup-token` in your terminal
-3. **Copy the token**: The command will output a token starting with `sk-ant-`
-
-### Configure Imp
 ```bash
-imp bootstrap  # Paste your token during setup
-# or
+imp bootstrap  # Configure during first-time setup
 imp login      # Update authentication later
 ```
 
-### Token Types (Auto-detected)
-- **OAuth tokens** (`sk-ant-oat*`): Use your Claude Pro/Max subscription
-- **API keys** (`sk-ant-api*`): Pay-per-token usage
+**Token types** (auto-detected from prefix):
+- `sk-ant-oat*` — OAuth (Claude Pro/Max subscription)
+- `sk-ant-api*` — API key (pay-per-token)
 
-Imp automatically detects which type you have and configures the appropriate authentication headers.
+## Core Features
 
-## First-time Setup
-
-Run the bootstrap wizard to configure your agent:
+### Interactive Chat
 
 ```bash
-imp bootstrap
-```
-
-This will:
-1. **Choose authentication method**: OAuth (Claude Pro/Max) or API Key
-2. **Agent identity**: Name your agent and set its personality  
-3. **User information**: Tell your agent about yourself and work style
-4. **Context setup**: Create template files for project understanding
-5. **Optional engineering context**: Tech stack, principles, and architecture files
-
-After bootstrap, you can switch authentication methods anytime with `imp login`.
-
-## Usage
-
-### Quick commands
-
-```bash
-# Ask a one-time question
-imp ask "What files are in this directory?"
-
-# Start an interactive chat session
 imp chat
-
-# Switch to OAuth authentication
-imp login
 ```
 
-### Context Files
+Full-featured terminal chat with:
+- **Markdown rendering** via termimad
+- **Input queue** — type while the agent is working, inputs are queued and processed in order
+- **Session management** — resume previous sessions, session picker with titles
+- **Multiline input** — backslash continuation (`line \`)
+- **Commands**: `/help`, `/quit`, `/clear`, `/compact`, `/session`, `/agents`, `/queue`, `/cancel`
 
-Imp uses markdown files in the `context/` directory to understand your project:
+### Sub-Agents
 
-- **`context/IDENTITY.md`** — Your agent's name and personality (created by `imp bootstrap`)
-- **`context/STACK.md`** — Technology stack and tools your team uses
-- **`context/PRINCIPLES.md`** — Coding standards and team practices
-- **`context/ARCHITECTURE.md`** — System architecture and design decisions
+Imp can spawn background sub-agents for parallel work. The agent decides when to delegate:
 
-Edit these files to customize how your agent behaves and what it knows about your project.
+```
+You: Refactor the auth module and update the tests
+
+Imp: I'll handle the refactoring directly and spawn a sub-agent for the tests.
+🚀 Sub-agent #1 spawned
+[continues working on refactoring while tests are written in parallel]
+```
+
+Sub-agents get their own conversation context, tools, and token budget. Results are automatically summarized when they complete.
+
+### Memory System
+
+Imp maintains two layers of memory:
+
+- **Daily notes** (`~/.imp/memory/YYYY-MM-DD.md`) — raw interaction logs
+- **Long-term memory** (`~/.imp/MEMORY.md`) — curated knowledge, preferences, lessons
+
+Run `imp reflect` to distill daily notes into long-term memory. This can also update `USER.md` (what Imp knows about you) and `SOUL.md` (the agent's evolving identity).
+
+### Workspace Awareness
+
+When you run Imp inside a project, it automatically detects:
+- **Git context** — current branch, dirty/clean status, last commit
+- **Language** — from Cargo.toml, package.json, go.mod, etc.
+- **Config files** — Dockerfile, CI configs, linters, test frameworks
+- **Project description** — from README
+- **Directory structure** — available on-demand (depth 3, excludes noise)
 
 ### Built-in Tools
 
-Imp ships with these tools that Claude can use:
+| Tool | Description |
+|------|-------------|
+| `exec` | Run shell commands |
+| `file_read` | Read files with line numbers, optional offset/limit for large files |
+| `file_edit` | Find-and-replace with exact match (rejects ambiguous multi-match edits) |
+| `file_write` | Create or overwrite files (auto-creates parent dirs) |
+| `search_code` | Search all files with ripgrep (optional file type filter) |
+| `list_files` | List directory contents |
+| `spawn_agent` | Spawn a background sub-agent for parallel work |
+| `check_agents` | Check status of running sub-agents |
 
-- **`exec`** — Run shell commands
-- **`file_read`** — Read file contents
-- **`file_write`** — Create or overwrite files
-- **`file_edit`** — Find and replace text in files
-- **`search_code`** — Search code using ripgrep
-- **`list_files`** — List directory contents
+### MCP Support
 
-### Adding Custom Tools
-
-Create TOML files in the `tools/` directory to add new capabilities:
+Extend Imp with any [MCP server](https://modelcontextprotocol.io/) — no code changes needed. Drop a TOML file in `~/.imp/mcp/`:
 
 ```toml
-# tools/git-status.toml
+# ~/.imp/mcp/github.toml
+[server]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+
+[server.env]
+GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}"
+```
+
+MCP tools appear alongside built-in tools seamlessly. Environment variables support `${VAR}` expansion.
+
+### Custom Tools
+
+Add shell-based tools via TOML files in `~/.imp/tools/`:
+
+```toml
 [tool]
 name = "git_status"
 description = "Get the current git status"
-
-[tool.parameters]
-# No parameters needed
 
 [handler]
 kind = "shell"
 command = "git status --porcelain"
 ```
 
+## Context System
+
+Imp uses a tiered context system to stay lean:
+
+**L1 — Always in system prompt** (kept small):
+- `SOUL.md` — agent identity and personality
+- `USER.md` — about you (preferences, work context)
+- Project summary (language, git status, config files)
+
+**L2 — Available on demand** (agent loads when relevant):
+- `MEMORY.md` — long-term memory
+- `memory/YYYY-MM-DD.md` — daily notes
+- Project context, patterns, history files
+- Directory structure snapshot
+- Git log and diff info
+
+**L3 — Cold storage**:
+- SQLite database with full conversation history
+
 ## Configuration
 
-Config is stored at `~/.imp/config.toml`. The format depends on your token type:
+Config lives at `~/.imp/config.toml`:
 
-### OAuth Configuration (Claude Pro/Max)
 ```toml
 [llm]
 provider = "anthropic"
 model = "claude-opus-4-5-20251101"
+max_tokens = 16384
 
 [auth]
-method = "oauth"
+method = "oauth"  # or "api_key"
 
 [auth.oauth]
-access_token = "sk-ant-oat..."  # Your setup-token
-refresh_token = ""
-expires_at = 1234567890
+access_token = "sk-ant-oat..."
+
+[thinking]
+enabled = false  # Extended thinking (Sonnet 4+ only)
 ```
 
-### API Key Configuration (Pay-per-token)
-```toml
-[llm]
-provider = "anthropic" 
-model = "claude-opus-4-5-20251101"
+### Key Directories
 
-[auth]
-method = "api_key"
-
-[auth.api_key]
-key = "sk-ant-api..."  # Your setup-token
+```
+~/.imp/
+├── config.toml          # Main configuration
+├── SOUL.md              # Agent identity & personality
+├── USER.md              # About you
+├── MEMORY.md            # Long-term memory
+├── memory/              # Daily notes (YYYY-MM-DD.md)
+├── mcp/                 # MCP server configs (*.toml)
+├── tools/               # Custom tool definitions (*.toml)
+├── projects/            # Per-project context
+│   └── <project-name>/
+│       ├── CONTEXT.md
+│       ├── PATTERNS.md
+│       ├── HISTORY.md
+│       └── memory/
+└── imp.db               # SQLite conversation history
 ```
 
-**Note**: 
-- Setup-tokens from `claude setup-token` are long-lived and don't need refresh
-- Token type is automatically detected from the `sk-ant-` prefix
-- Both use the same `claude setup-token` command - the type depends on your Claude account
+## Commands
 
-## Examples
+| Command | Description |
+|---------|-------------|
+| `imp bootstrap` | First-time setup wizard |
+| `imp chat` | Interactive chat session |
+| `imp chat --resume` | Pick a previous session to resume |
+| `imp chat --continue` | Continue the last session |
+| `imp chat --session <id>` | Resume a specific session |
+| `imp ask "<question>"` | One-shot question |
+| `imp reflect [--date YYYY-MM-DD]` | Reflect on a day's interactions |
+| `imp login` | Update authentication |
+| `imp project list` | List registered projects |
+| `imp learn` | Interactive learning session |
 
-```bash
-# One-shot tasks
-imp ask "Create a README for this project"
-imp ask "What's wrong with this error?" # (paste error in follow-up)
+## Token Usage & Cost
 
-# Interactive session
-imp chat
-> What does this function do? # (then show file contents)
-> How can I optimize this code?
-> Write tests for the user authentication module
-> quit
-```
+Imp tracks token usage per session with model-aware pricing:
+- Displays per-request and session totals
+- Tracks prompt caching (cache read/write tokens)
+- Supports pricing for Opus 4.5, Opus 4, Sonnet, and Haiku
 
-## Contributing
+## Roadmap
 
-This is Phase 1 — a working foundation. Planned features:
-
-- Web UI for chat interface
-- Cron jobs and scheduling
-- Team integration (Slack, GitHub)
-- Semantic code search
-- Advanced context management
+See [ROADMAP.md](ROADMAP.md) for planned features including:
+- Smart memory with embeddings and vector search
+- Daemon mode with background tasks and proactivity
+- Channel integrations (Telegram, Slack)
+- Web UI
+- Automatic pattern extraction and adaptive behavior
 
 ## License
 
-[Your license here]
+MIT

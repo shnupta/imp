@@ -1,7 +1,6 @@
 use crate::agent::Agent;
 use crate::error::Result;
 use console::style;
-use dialoguer::Input;
 use std::io::{self, Write};
 
 pub async fn run(resume: bool, session: Option<String>) -> Result<()> {
@@ -62,16 +61,14 @@ pub async fn run(resume: bool, session: Option<String>) -> Result<()> {
         print!("{} ", style("You:").bold().green());
         io::stdout().flush()?;
 
-        let input: String = match Input::new()
-            .with_prompt("")
-            .allow_empty(true)
-            .interact()
-        {
-            Ok(input) => input,
+        let mut input_buf = String::new();
+        match io::stdin().read_line(&mut input_buf) {
+            Ok(0) => break,  // EOF
+            Ok(_) => {}
             Err(_) => break,
-        };
+        }
 
-        let input = input.trim();
+        let input = input_buf.trim();
 
         if input.is_empty() {
             continue;

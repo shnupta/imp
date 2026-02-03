@@ -16,7 +16,9 @@ Imp is an AI agent that acts as both a **coding partner** and **work organizer**
 ### Prerequisites
 
 - Rust (install from [rustup.rs](https://rustup.rs/))
-- An [Anthropic API key](https://console.anthropic.com/)
+- **Authentication** (choose one):
+  - **OAuth**: Claude Pro or Max subscription (recommended)
+  - **API Key**: Anthropic API key from [console.anthropic.com](https://console.anthropic.com/)
 - Optional: `ripgrep` for better code search (install via your package manager or [GitHub](https://github.com/BurntSushi/ripgrep))
 
 **System Requirements:**
@@ -37,6 +39,26 @@ cargo install --path .
 
 After installation, `imp` will be available from anywhere in your terminal.
 
+## Authentication
+
+Imp supports two authentication methods:
+
+### OAuth (Recommended)
+If you have a Claude Pro or Max subscription, use OAuth to authenticate directly with your existing account:
+
+```bash
+imp bootstrap  # Choose OAuth during setup
+# or
+imp login      # Switch to OAuth later
+```
+
+### API Key
+Use your Anthropic API key for pay-per-token usage:
+
+```bash
+imp bootstrap  # Choose API Key during setup
+```
+
 ## First-time Setup
 
 Run the bootstrap wizard to configure your agent:
@@ -46,10 +68,13 @@ imp bootstrap
 ```
 
 This will:
-1. Ask you to name your agent and set its personality
-2. Request your Anthropic API key
-3. Set up context directory with template files
-4. Create default tools configuration
+1. **Choose authentication method**: OAuth (Claude Pro/Max) or API Key
+2. **Agent identity**: Name your agent and set its personality  
+3. **User information**: Tell your agent about yourself and work style
+4. **Context setup**: Create template files for project understanding
+5. **Optional engineering context**: Tech stack, principles, and architecture files
+
+After bootstrap, you can switch authentication methods anytime with `imp login`.
 
 ## Usage
 
@@ -61,6 +86,9 @@ imp ask "What files are in this directory?"
 
 # Start an interactive chat session
 imp chat
+
+# Switch to OAuth authentication
+imp login
 ```
 
 ### Context Files
@@ -105,17 +133,37 @@ command = "git status --porcelain"
 
 ## Configuration
 
-Config is stored at `~/.imp/config.toml`:
+Config is stored at `~/.imp/config.toml`. The format depends on your authentication method:
 
+### OAuth Configuration
 ```toml
 [llm]
 provider = "anthropic"
-api_key = "sk-ant-..."
-model = "claude-3-sonnet-20240229"
+model = "claude-opus-4-5-20251101"
 
-[workspace]
-repos_dir = "~/code"
+[auth]
+method = "oauth"
+
+[auth.oauth]
+access_token = "..."
+refresh_token = "..."
+expires_at = 1234567890
 ```
+
+### API Key Configuration
+```toml
+[llm]
+provider = "anthropic" 
+model = "claude-opus-4-5-20251101"
+
+[auth]
+method = "api_key"
+
+[auth.api_key]
+key = "sk-ant-..."
+```
+
+**Note**: OAuth tokens are automatically refreshed when they expire. API keys don't expire but bill per usage.
 
 ## Examples
 

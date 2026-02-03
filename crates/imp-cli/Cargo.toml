@@ -24,3 +24,4 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 eventsource-stream = { workspace = true }
 bytes = { workspace = true }
+anthropic-auth = { version = "0.1", features = ["async", "callback-server"] }

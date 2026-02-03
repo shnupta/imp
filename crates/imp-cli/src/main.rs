@@ -16,7 +16,7 @@ mod error;
 mod project;
 mod tools;
 
-use cli::{bootstrap, chat, oneshot, project_cmd};
+use cli::{bootstrap, chat, login, oneshot, project_cmd};
 
 #[derive(Parser)]
 #[command(name = "imp")]
@@ -33,6 +33,8 @@ struct Cli {
 enum Commands {
     /// Bootstrap wizard — set up your agent for the first time
     Bootstrap,
+    /// Login with OAuth (for Claude Pro/Max subscriptions) or re-authenticate
+    Login,
     /// Ask your agent a question or give it a task
     Ask {
         /// The question or task
@@ -68,6 +70,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Bootstrap => {
             bootstrap::run().await?;
+        }
+        Commands::Login => {
+            login::run().await?;
         }
         Commands::Ask { message } => {
             let full_message = message.join(" ");

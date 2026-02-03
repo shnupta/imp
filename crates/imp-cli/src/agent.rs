@@ -20,10 +20,7 @@ impl Agent {
     pub async fn new() -> Result<Self> {
         let config = Config::load()?;
 
-        let client = ClaudeClient::new(
-            config.llm.api_key.clone(),
-            Some(config.llm.model.clone()),
-        );
+        let client = ClaudeClient::new(config.clone())?;
 
         // Detect and auto-register project
         let cwd = std::env::current_dir()?;

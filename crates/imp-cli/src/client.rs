@@ -1,6 +1,8 @@
+use crate::config::{AuthMethod, Config};
 use crate::error::{ImpError, Result};
+use anthropic_auth::{AsyncOAuthClient, OAuthConfig as AuthOAuthConfig};
 use futures::stream::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -71,40 +73,108 @@ struct Delta {
 
 pub struct ClaudeClient {
     client: reqwest::Client,
-    api_key: String,
     model: String,
     base_url: String,
+    config: Config,
+    oauth_client: Option<AsyncOAuthClient>,
 }
 
 impl ClaudeClient {
-    pub fn new(api_key: String, model: Option<String>) -> Self {
+    pub fn new(config: Config) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
             .build()
             .unwrap();
 
-        Self {
+        // Initialize OAuth client if using OAuth
+        let oauth_client = if config.auth_method() == &AuthMethod::OAuth {
+            Some(AsyncOAuthClient::new(AuthOAuthConfig::default())
+                .map_err(|e| ImpError::Config(format!("Failed to initialize OAuth client: {}", e)))?)
+        } else {
+            None
+        };
+
+        Ok(Self {
             client,
-            api_key,
-            model: model.unwrap_or_else(|| "claude-opus-4-5-20251101".to_string()),
+            model: config.llm.model.clone(),
             base_url: "https://api.anthropic.com".to_string(),
+            config,
+            oauth_client,
+        })
+    }
+
+    /// Ensure we have a valid access token, refreshing if necessary
+    async fn ensure_valid_token(&mut self) -> Result<()> {
+        if self.config.auth_method() == &AuthMethod::OAuth {
+            if self.config.is_oauth_token_expired() {
+                self.refresh_oauth_token().await?;
+            }
         }
+        Ok(())
+    }
+
+    /// Refresh the OAuth access token
+    async fn refresh_oauth_token(&mut self) -> Result<()> {
+        let oauth_client = self.oauth_client.as_ref()
+            .ok_or_else(|| ImpError::Config("OAuth client not initialized".to_string()))?;
+
+        let oauth_config = self.config.oauth_config()
+            .ok_or_else(|| ImpError::Config("OAuth configuration missing".to_string()))?;
+
+        let new_tokens = oauth_client
+            .refresh_token(&oauth_config.refresh_token)
+            .await
+            .map_err(|e| ImpError::Agent(format!("Failed to refresh OAuth token: {}", e)))?;
+
+        // Update config with new tokens
+        self.config.update_oauth_tokens(
+            new_tokens.access_token,
+            new_tokens.refresh_token,
+            new_tokens.expires_at as i64,
+        )?;
+
+        Ok(())
+    }
+
+    /// Prepare authorization headers based on the current auth method
+    fn prepare_auth_headers(&self) -> Result<HeaderMap> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+
+        match self.config.auth_method() {
+            AuthMethod::ApiKey => {
+                let api_key = self.config.api_key()
+                    .ok_or_else(|| ImpError::Config("API key not found in config".to_string()))?;
+                headers.insert(
+                    "x-api-key",
+                    HeaderValue::from_str(api_key)?,
+                );
+            }
+            AuthMethod::OAuth => {
+                let oauth_config = self.config.oauth_config()
+                    .ok_or_else(|| ImpError::Config("OAuth configuration missing".to_string()))?;
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", oauth_config.access_token))?,
+                );
+            }
+        }
+
+        Ok(headers)
     }
 
     pub async fn send_message(
-        &self,
+        &mut self,
         messages: Vec<Message>,
         system_prompt: Option<String>,
         tools: Option<Value>,
         stream: bool,
     ) -> Result<AnthropicResponse> {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            "x-api-key",
-            HeaderValue::from_str(&self.api_key)?,
-        );
-        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        // Ensure we have a valid token (refresh if necessary)
+        self.ensure_valid_token().await?;
+
+        let headers = self.prepare_auth_headers()?;
 
         let mut request_body = json!({
             "model": self.model,

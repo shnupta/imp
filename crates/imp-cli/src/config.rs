@@ -3,21 +3,59 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LlmConfig {
     pub provider: String,
-    pub api_key: String,
     #[serde(default = "default_model")]
     pub model: String,
+    /// Legacy API key field - still supported for backward compatibility
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct AuthConfig {
+    #[serde(default = "default_auth_method")]
+    pub method: AuthMethod,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<ApiKeyConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    #[default]
+    ApiKey,
+    OAuth,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OAuthConfig {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ApiKeyConfig {
+    pub key: String,
 }
 
 fn default_model() -> String {
     "claude-opus-4-5-20251101".to_string()
+}
+
+fn default_auth_method() -> AuthMethod {
+    AuthMethod::ApiKey
 }
 
 /// Returns the Imp home directory (~/.imp/ by default, respects IMP_HOME env var).
@@ -37,7 +75,7 @@ impl Config {
 
         if !config_path.exists() {
             return Err(ImpError::Config(format!(
-                "Config file not found at {}. Run 'imp init' first.",
+                "Config file not found at {}. Run 'imp bootstrap' first.",
                 config_path.display()
             )));
         }
@@ -45,20 +83,49 @@ impl Config {
         let content = fs::read_to_string(&config_path)
             .map_err(|e| ImpError::Config(format!("Failed to read config file: {}", e)))?;
         
-        let config: Config = toml::from_str(&content)
+        let mut config: Config = toml::from_str(&content)
             .map_err(|e| ImpError::Config(format!("Failed to parse config file: {}", e)))?;
         
-        // Validate the config
-        if config.llm.api_key.trim().is_empty() {
-            return Err(ImpError::Config(
-                "API key is empty. Run 'imp init' to set it up.".to_string()
-            ));
+        // Handle legacy format - migrate old api_key to new auth structure
+        if let Some(legacy_key) = &config.llm.api_key {
+            if config.auth.api_key.is_none() && config.auth.oauth.is_none() {
+                config.auth.method = AuthMethod::ApiKey;
+                config.auth.api_key = Some(ApiKeyConfig {
+                    key: legacy_key.clone(),
+                });
+                // Clear the legacy field
+                config.llm.api_key = None;
+                
+                // Save the migrated config
+                config.save()?;
+            }
         }
+        
+        // Validate the config
+        match &config.auth.method {
+            AuthMethod::ApiKey => {
+                let api_key_config = config.auth.api_key.as_ref()
+                    .ok_or_else(|| ImpError::Config("API key configuration missing. Run 'imp bootstrap' to set it up.".to_string()))?;
+                
+                if api_key_config.key.trim().is_empty() {
+                    return Err(ImpError::Config(
+                        "API key is empty. Run 'imp bootstrap' to set it up.".to_string()
+                    ));
+                }
 
-        if !config.llm.api_key.starts_with("sk-ant-") {
-            return Err(ImpError::Config(
-                "API key doesn't look like a valid Anthropic key (should start with 'sk-ant-')".to_string()
-            ));
+                if !api_key_config.key.starts_with("sk-ant-") {
+                    return Err(ImpError::Config(
+                        "API key doesn't look like a valid Anthropic key (should start with 'sk-ant-')".to_string()
+                    ));
+                }
+            }
+            AuthMethod::OAuth => {
+                if config.auth.oauth.is_none() {
+                    return Err(ImpError::Config(
+                        "OAuth configuration missing. Run 'imp bootstrap' or 'imp login' to set it up.".to_string()
+                    ));
+                }
+            }
         }
 
         Ok(config)
@@ -79,5 +146,48 @@ impl Config {
 
     pub fn config_path() -> Result<PathBuf> {
         Ok(imp_home()?.join("config.toml"))
+    }
+
+    /// Get the current authentication method
+    pub fn auth_method(&self) -> &AuthMethod {
+        &self.auth.method
+    }
+
+    /// Get the API key if using API key authentication
+    pub fn api_key(&self) -> Option<&str> {
+        self.auth.api_key.as_ref().map(|config| config.key.as_str())
+    }
+
+    /// Get OAuth config if using OAuth authentication
+    pub fn oauth_config(&self) -> Option<&OAuthConfig> {
+        self.auth.oauth.as_ref()
+    }
+
+    /// Update OAuth tokens and save to disk
+    pub fn update_oauth_tokens(&mut self, access_token: String, refresh_token: String, expires_at: i64) -> Result<()> {
+        self.auth.method = AuthMethod::OAuth;
+        self.auth.oauth = Some(OAuthConfig {
+            access_token,
+            refresh_token,
+            expires_at,
+        });
+        self.save()
+    }
+
+    /// Check if OAuth token is expired (with 5 minute buffer)
+    pub fn is_oauth_token_expired(&self) -> bool {
+        if let Some(oauth) = &self.auth.oauth {
+            let now = chrono::Utc::now().timestamp();
+            oauth.expires_at - 300 < now // 5 minute buffer
+        } else {
+            true
+        }
+    }
+}
+
+impl OAuthConfig {
+    pub fn is_expired(&self) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        self.expires_at - 300 < now // 5 minute buffer
     }
 }

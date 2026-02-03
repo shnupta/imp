@@ -84,7 +84,7 @@ impl Agent {
 
         let mut tools = ToolRegistry::new();
         let tools_dir = crate::config::imp_home()?.join("tools");
-        tools.load_from_directory(tools_dir)?;
+        tools.load_from_directory(tools_dir).await?;
 
         // Open SQLite database and create a new session
         let db = Database::open()?;
@@ -185,7 +185,7 @@ impl Agent {
             let system_prompt = self.context.assemble_system_prompt();
             let system_tokens = system_prompt.len() / 4; // rough estimate
             self.messages = compaction::compact_if_needed(&self.messages, system_tokens);
-            let tools = Some(self.tools.get_tool_schemas());
+            let tools = Some(self.tools.get_tool_schemas().await);
 
             // Show thinking indicator for non-streaming mode
             let show_thinking = !stream && self.config.thinking.enabled;

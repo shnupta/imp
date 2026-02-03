@@ -142,7 +142,7 @@ impl SubAgent {
         let mut client = ClaudeClient::new(self.config.clone())?;
 
         let mut tools = ToolRegistry::new();
-        tools.load_subagent_builtins();
+        tools.load_subagent_builtins_with_mcp().await?;
 
         let db = Database::open()?;
         let session_id = db.create_session(Some(&format!("subagent-{}", self.id)))?;
@@ -232,7 +232,7 @@ impl SubAgent {
                 }
             }
 
-            let tool_schemas = Some(tools.get_tool_schemas());
+            let tool_schemas = Some(tools.get_tool_schemas().await);
 
             let response = client
                 .send_message(

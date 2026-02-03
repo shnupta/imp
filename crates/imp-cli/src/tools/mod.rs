@@ -13,6 +13,9 @@ use std::path::Path;
 use std::process::Command;
 
 pub mod builtin;
+pub mod mcp;
+
+use mcp::{McpRegistry, convert_mcp_to_anthropic_schema};
 
 #[derive(Debug, Deserialize)]
 pub struct ToolDefinition {
@@ -60,16 +63,51 @@ pub struct ToolResult {
 
 pub struct ToolRegistry {
     tools: HashMap<String, ToolDefinition>,
+    mcp_registry: McpRegistry,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            mcp_registry: McpRegistry::new(),
         }
     }
 
-    pub fn load_from_directory<P: AsRef<Path>>(&mut self, tools_dir: P) -> Result<()> {
+    pub async fn load_from_directory<P: AsRef<Path>>(&mut self, tools_dir: P) -> Result<()> {
+        let tools_dir = tools_dir.as_ref();
+        
+        // Load builtin tools
+        self.load_builtin_tools();
+        
+        // Load tools from TOML files if directory exists
+        if tools_dir.exists() {
+            for entry in fs::read_dir(tools_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "toml") {
+                    let content = fs::read_to_string(&path)?;
+                    let tool_def: ToolDefinition = toml::from_str(&content)?;
+                    self.tools.insert(tool_def.tool.name.clone(), tool_def);
+                }
+            }
+        }
+
+        // Load MCP servers from ~/.imp/mcp/ directory
+        if let Ok(imp_home) = crate::config::imp_home() {
+            let mcp_dir = imp_home.join("mcp");
+            if let Err(e) = self.mcp_registry.load_from_directory(&mcp_dir).await {
+                eprintln!("Warning: Failed to load MCP servers: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+    
+    /// Load only the tools (synchronous version for compatibility).
+    /// This is used where async is not available, but MCP won't be loaded.
+    pub fn load_from_directory_sync<P: AsRef<Path>>(&mut self, tools_dir: P) -> Result<()> {
         let tools_dir = tools_dir.as_ref();
         
         // Load builtin tools
@@ -125,9 +163,81 @@ impl ToolRegistry {
         for tool in builtins {
             self.tools.insert(tool.tool.name.clone(), tool);
         }
+        
+        // Note: MCP tools are not loaded for subagents in the current design.
+        // This could be extended in the future if needed.
+    }
+    
+    /// Async version of subagent builtin loading that also loads MCP tools.
+    pub async fn load_subagent_builtins_with_mcp(&mut self) -> Result<()> {
+        self.load_subagent_builtins();
+        
+        // Load MCP servers for sub-agents too
+        if let Ok(imp_home) = crate::config::imp_home() {
+            let mcp_dir = imp_home.join("mcp");
+            if let Err(e) = self.mcp_registry.load_from_directory(&mcp_dir).await {
+                eprintln!("Warning: Failed to load MCP servers for subagent: {}", e);
+            }
+        }
+        
+        Ok(())
     }
 
-    pub fn get_tool_schemas(&self) -> Value {
+    pub async fn get_tool_schemas(&self) -> Value {
+        let mut schemas = Vec::new();
+
+        // Add builtin and custom tools
+        for tool_def in self.tools.values() {
+            let mut properties = serde_json::Map::new();
+            let mut required = Vec::new();
+
+            for (param_name, param_def) in &tool_def.tool.parameters {
+                if param_def.required {
+                    required.push(param_name.clone());
+                }
+
+                let mut param_schema = serde_json::Map::new();
+                param_schema.insert("type".to_string(), Value::String(param_def.param_type.clone()));
+                
+                if let Some(ref desc) = param_def.description {
+                    param_schema.insert("description".to_string(), Value::String(desc.clone()));
+                }
+
+                properties.insert(param_name.clone(), Value::Object(param_schema));
+            }
+
+            let schema = json!({
+                "name": tool_def.tool.name,
+                "description": tool_def.tool.description,
+                "input_schema": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
+            });
+
+            schemas.push(schema);
+        }
+        
+        // Add MCP tools
+        match self.mcp_registry.get_all_tools().await {
+            Ok(mcp_tools) => {
+                for mcp_tool_def in mcp_tools {
+                    let schema = convert_mcp_to_anthropic_schema(&mcp_tool_def.mcp_tool);
+                    schemas.push(schema);
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to get MCP tool schemas: {}", e);
+            }
+        }
+
+        Value::Array(schemas)
+    }
+    
+    /// Synchronous version of get_tool_schemas for compatibility.
+    /// This will not include MCP tools.
+    pub fn get_tool_schemas_sync(&self) -> Value {
         let mut schemas = Vec::new();
 
         for tool_def in self.tools.values() {
@@ -166,27 +276,41 @@ impl ToolRegistry {
     }
 
     pub async fn execute_tool(&self, tool_call: &ToolCall) -> Result<ToolResult> {
-        let tool_def = self.tools.get(&tool_call.name)
-            .ok_or_else(|| ImpError::Tool(format!("Unknown tool: {}", tool_call.name)))?;
-
-        let result = match tool_def.handler.kind.as_str() {
-            "builtin" => {
-                builtin::execute_builtin(&tool_call.name, &tool_call.arguments).await
-            }
-            "shell" => {
-                if let Some(ref command_template) = tool_def.handler.command {
-                    let command = self.render_template(command_template, &tool_call.arguments)?;
-                    execute_shell_command(&command).await
-                } else {
-                    Err(ImpError::Tool("Shell handler missing command".to_string()))
+        // First check if it's a built-in or custom tool
+        if let Some(tool_def) = self.tools.get(&tool_call.name) {
+            let result = match tool_def.handler.kind.as_str() {
+                "builtin" => {
+                    builtin::execute_builtin(&tool_call.name, &tool_call.arguments).await
                 }
-            }
-            _ => {
-                Err(ImpError::Tool(format!("Unknown handler kind: {}", tool_def.handler.kind)))
-            }
-        };
+                "shell" => {
+                    if let Some(ref command_template) = tool_def.handler.command {
+                        let command = self.render_template(command_template, &tool_call.arguments)?;
+                        execute_shell_command(&command).await
+                    } else {
+                        Err(ImpError::Tool("Shell handler missing command".to_string()))
+                    }
+                }
+                _ => {
+                    Err(ImpError::Tool(format!("Unknown handler kind: {}", tool_def.handler.kind)))
+                }
+            };
 
-        match result {
+            return match result {
+                Ok(content) => Ok(ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    content,
+                    error: None,
+                }),
+                Err(e) => Ok(ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    content: String::new(),
+                    error: Some(e.to_string()),
+                }),
+            };
+        }
+        
+        // If not a built-in tool, try MCP
+        match self.mcp_registry.call_tool(&tool_call.name, &tool_call.arguments).await {
             Ok(content) => Ok(ToolResult {
                 tool_use_id: tool_call.id.clone(),
                 content,

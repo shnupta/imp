@@ -12,6 +12,7 @@ use crate::project::ProjectInfo;
 use chrono::Local;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 /// Context manager with tiered loading.
 ///
@@ -79,6 +80,29 @@ impl ContextManager {
 
         // ── Per-project context ──────────────────────────────────────
         if let Some(proj) = project {
+            // L1: Enhanced project summary
+            let mut project_summary = format!("**Project:** {}", proj.name);
+            if let Some(ref lang) = proj.language {
+                project_summary.push_str(&format!(" ({lang})"));
+            }
+            if let Some(ref desc) = proj.description {
+                project_summary.push_str(&format!("\n**Description:** {desc}"));
+            }
+            if !proj.config_files.is_empty() {
+                project_summary.push_str(&format!("\n**Config:** {}", proj.config_files.join(", ")));
+            }
+            
+            // Add git context to L1
+            let project_path = Path::new(&proj.path);
+            if let Some(git_context) = generate_git_context(project_path) {
+                project_summary.push_str(&format!("\n**Git:** {git_context}"));
+            }
+
+            l1_sections.push(ContextSection {
+                heading: format!("Current Project — {}", proj.name),
+                content: project_summary,
+            });
+
             let project_dir = home.join("projects").join(&proj.name);
             if project_dir.exists() {
                 // L1: Project summary (first ~500 chars of CONTEXT.md)
@@ -115,8 +139,15 @@ impl ContextManager {
                 );
             }
 
+            // L2: Directory structure snapshot (generated on-demand)
+            l2_manifest.push(L2FileInfo {
+                path: format!("(run: find {} -type f -name '*.rs' -o -name '*.js' -o -name '*.py' -o -name '*.go' -o -name '*.java' | head -50)", proj.path),
+                heading: format!("Key source files — {}", proj.name),
+                size_hint: "run via exec".to_string(),
+            });
+
             // Git context → L2 (just note that it's available)
-            register_git_context_l2(Path::new(&proj.path), &proj.name, &mut l2_manifest);
+            register_git_context_l2(project_path, &proj.name, &mut l2_manifest);
 
             // Auto-detect common AI coding assistant rules files
             let project_root = Path::new(&proj.path);
@@ -377,4 +408,157 @@ fn format_display_path(path: &Path) -> String {
         }
     }
     path.display().to_string()
+}
+
+/// Generate git context for L1 (always loaded) - lean summary
+fn generate_git_context(project_path: &Path) -> Option<String> {
+    // Check if it's a git repo
+    let git_dir = project_path.join(".git");
+    if !git_dir.exists() {
+        return None;
+    }
+
+    let mut git_info = Vec::new();
+
+    // Get current branch
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(project_path)
+        .output() 
+    {
+        if output.status.success() {
+            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !branch.is_empty() && branch != "HEAD" {
+                git_info.push(format!("Branch: {}", branch));
+            }
+        }
+    }
+
+    // Get short status (modified files count)
+    if let Ok(output) = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(project_path)
+        .output()
+    {
+        if output.status.success() {
+            let status_text = String::from_utf8_lossy(&output.stdout);
+            let status_count = status_text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count();
+            
+            if status_count == 0 {
+                git_info.push("Status: clean".to_string());
+            } else {
+                git_info.push(format!("Status: {} files modified", status_count));
+            }
+        }
+    }
+
+    // Get last commit (one-liner)
+    if let Ok(output) = Command::new("git")
+        .args(["log", "-1", "--pretty=format:%h %s"])
+        .current_dir(project_path)
+        .output()
+    {
+        if output.status.success() {
+            let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !commit.is_empty() {
+                git_info.push(format!("Last: {}", commit));
+            }
+        }
+    }
+
+    if git_info.is_empty() {
+        None
+    } else {
+        Some(git_info.join(" | "))
+    }
+}
+
+/// Generate directory structure snapshot for L2 (on-demand)
+fn generate_directory_structure(project_path: &Path) -> String {
+    let mut entries = Vec::new();
+    
+    // Common directories to exclude from tree view
+    let exclude_dirs = [
+        ".git", "node_modules", "target", "dist", "build", ".next",
+        "__pycache__", ".pytest_cache", "venv", ".venv", "env", ".env",
+        ".cargo", ".rustc_info.json", "Cargo.lock", ".DS_Store",
+        ".idea", ".vscode", "coverage", ".coverage", "htmlcov",
+        "tmp", "temp", ".tmp", ".sass-cache", ".cache",
+    ];
+
+    fn collect_entries(
+        dir: &Path, 
+        prefix: &str, 
+        entries: &mut Vec<String>, 
+        depth: usize, 
+        exclude: &[&str],
+        max_entries: usize
+    ) {
+        if depth >= 3 || entries.len() >= max_entries {
+            return;
+        }
+
+        let read_dir = match fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => return,
+        };
+
+        let mut items: Vec<_> = read_dir
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                let file_name = entry.file_name();
+                let name = file_name.to_string_lossy();
+                !exclude.contains(&name.as_ref())
+            })
+            .collect();
+
+        // Sort directories first, then files
+        items.sort_by_key(|entry| {
+            let is_dir = entry.path().is_dir();
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy().to_string();
+            (!is_dir, name)
+        });
+
+        for (i, entry) in items.iter().enumerate() {
+            if entries.len() >= max_entries {
+                break;
+            }
+
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            let is_last = i == items.len() - 1;
+            let tree_char = if is_last { "└── " } else { "├── " };
+            let next_prefix = if is_last { "    " } else { "│   " };
+
+            let path = entry.path();
+            if path.is_dir() {
+                entries.push(format!("{}{}{}/", prefix, tree_char, name));
+                collect_entries(
+                    &path,
+                    &format!("{}{}", prefix, next_prefix),
+                    entries,
+                    depth + 1,
+                    exclude,
+                    max_entries
+                );
+            } else {
+                entries.push(format!("{}{}{}", prefix, tree_char, name));
+            }
+        }
+    }
+
+    collect_entries(project_path, "", &mut entries, 0, &exclude_dirs, 100);
+
+    if entries.is_empty() {
+        "Directory structure not available".to_string()
+    } else {
+        if entries.len() >= 100 {
+            entries.push("... (truncated at 100 entries)".to_string());
+        }
+        entries.join("\n")
+    }
 }

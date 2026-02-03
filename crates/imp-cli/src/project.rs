@@ -15,6 +15,15 @@ pub struct ProjectInfo {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_remote: Option<String>,
+    /// Primary programming language detected from project files
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Key configuration files present in the project
+    #[serde(default)]
+    pub config_files: Vec<String>,
+    /// First line of README.md if present (project description)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 // ── Detection ────────────────────────────────────────────────────────
@@ -33,6 +42,7 @@ pub fn detect_project(cwd: &Path) -> Option<ProjectInfo> {
     }
 
     let repo_root = String::from_utf8_lossy(&toplevel.stdout).trim().to_string();
+    let root_path = Path::new(&repo_root);
 
     let git_remote = Command::new("git")
         .args(["remote", "get-url", "origin"])
@@ -50,17 +60,29 @@ pub fn detect_project(cwd: &Path) -> Option<ProjectInfo> {
 
     let name = match &git_remote {
         Some(remote) => project_name_from_remote(remote),
-        None => Path::new(&repo_root)
+        None => root_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string(),
     };
 
+    // Detect primary language
+    let language = detect_primary_language(root_path);
+
+    // Detect key configuration files
+    let config_files = detect_config_files(root_path);
+
+    // Extract project description from README.md
+    let description = extract_readme_description(root_path);
+
     Some(ProjectInfo {
         name,
         path: repo_root,
         git_remote,
+        language,
+        config_files,
+        description,
     })
 }
 
@@ -72,6 +94,106 @@ fn project_name_from_remote(url: &str) -> String {
         .next()
         .unwrap_or("unknown")
         .to_string()
+}
+
+/// Detect the primary programming language from project files
+fn detect_primary_language(root: &Path) -> Option<String> {
+    // Check for language-specific files in priority order
+    let language_indicators = [
+        ("Cargo.toml", "Rust"),
+        ("package.json", "JavaScript/TypeScript"),
+        ("pyproject.toml", "Python"),
+        ("setup.py", "Python"),
+        ("requirements.txt", "Python"),
+        ("go.mod", "Go"),
+        ("pom.xml", "Java"),
+        ("build.gradle", "Java"),
+        ("CMakeLists.txt", "C/C++"),
+        ("Makefile", "C/C++"),
+        ("composer.json", "PHP"),
+        ("mix.exs", "Elixir"),
+        ("pubspec.yaml", "Dart/Flutter"),
+    ];
+
+    for (file, lang) in &language_indicators {
+        if root.join(file).exists() {
+            return Some(lang.to_string());
+        }
+    }
+
+    None
+}
+
+/// Detect key configuration files present in the project
+fn detect_config_files(root: &Path) -> Vec<String> {
+    let config_candidates = [
+        "Makefile",
+        "Dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        ".github/workflows",
+        ".gitlab-ci.yml",
+        "azure-pipelines.yml",
+        "Jenkinsfile",
+        ".travis.yml",
+        "circle.yml",
+        ".circleci/config.yml",
+        "tailwind.config.js",
+        "vite.config.js",
+        "webpack.config.js",
+        "rollup.config.js",
+        "tsconfig.json",
+        ".eslintrc.json",
+        ".eslintrc.js",
+        "prettier.config.js",
+        ".prettierrc",
+        "jest.config.js",
+        "vitest.config.js",
+        "playwright.config.js",
+        "cypress.config.js",
+        ".env.example",
+        ".env.template",
+        "flake.nix",
+        "shell.nix",
+        "Procfile",
+        "app.yaml",
+        "serverless.yml",
+    ];
+
+    let mut found = Vec::new();
+    for candidate in &config_candidates {
+        let path = root.join(candidate);
+        if path.exists() {
+            found.push(candidate.to_string());
+        }
+    }
+
+    found
+}
+
+/// Extract the first meaningful line from README.md as project description
+fn extract_readme_description(root: &Path) -> Option<String> {
+    let readme_files = ["README.md", "readme.md", "Readme.md", "README.rst", "README.txt"];
+    
+    for readme_name in &readme_files {
+        let readme_path = root.join(readme_name);
+        if let Ok(content) = fs::read_to_string(&readme_path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                // Skip empty lines and markdown headers
+                if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("<!--") {
+                    // Return first meaningful line, truncated if too long
+                    if trimmed.len() > 120 {
+                        return Some(format!("{}…", &trimmed[..117]));
+                    } else {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 // ── Registry ─────────────────────────────────────────────────────────

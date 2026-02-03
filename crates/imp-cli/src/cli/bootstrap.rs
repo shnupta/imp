@@ -1,5 +1,4 @@
-use crate::config::{imp_home, AuthConfig, AuthMethod, ApiKeyConfig, Config, LlmConfig, OAuthConfig};
-use crate::claude_code;
+use crate::config::{imp_home, AuthConfig, Config, LlmConfig};
 use crate::error::Result;
 use console::style;
 use dialoguer::{Confirm, Input, Password};
@@ -30,37 +29,41 @@ pub async fn run() -> Result<()> {
 
     // ── 1. Authentication Method ─────────────────────────────────────
     println!("{}", style("1. Authentication Method").bold());
+    println!("To use imp, you need an Anthropic token.\n");
+    println!("{}", style("Getting your token:").bold());
+    println!("1. Install Claude Code CLI: https://claude.ai/code");
+    println!("2. Run: claude setup-token");
+    println!("3. Copy the token that appears");
+    println!("4. Paste it below\n");
     
-    // Check for Claude Code credentials first
-    let (auth_method, oauth_config, api_key) = if claude_code::claude_code_credentials_exist() {
-        println!("{}", style("Found Claude Code credentials!").green());
-        println!("We found existing Claude Code OAuth credentials on your system.\n");
-        
-        let use_claude_code = Confirm::new()
-            .with_prompt("Use your existing Claude Code OAuth login?")
-            .default(true)
+    let token = loop {
+        let input_token = Password::new()
+            .with_prompt("Enter your Anthropic token (from 'claude setup-token')")
             .interact()?;
-
-        if use_claude_code {
-            match claude_code::read_claude_code_credentials() {
-                Ok(credentials) => {
-                    let oauth_config = claude_code::to_oauth_config(&credentials);
-                    println!("✅ Imported Claude Code OAuth credentials");
-                    (AuthMethod::OAuth, Some(oauth_config), None)
-                }
-                Err(e) => {
-                    println!("{}", style(format!("❌ Failed to read Claude Code credentials: {}", e)).red());
-                    println!("Falling back to manual authentication setup.\n");
-                    setup_manual_auth().await?
-                }
-            }
-        } else {
-            setup_manual_auth().await?
+        
+        if input_token.trim().is_empty() {
+            println!("{}", style("❌ Token cannot be empty").red());
+            continue;
         }
-    } else {
-        println!("No Claude Code credentials found.");
-        println!("Choose how you want to authenticate with Anthropic:\n");
-        setup_manual_auth().await?
+        
+        if !input_token.starts_with("sk-ant-") {
+            println!(
+                "{}",
+                style("⚠️  Warning: token doesn't look like an Anthropic token (should start with 'sk-ant-')")
+                    .yellow()
+            );
+            
+            let continue_anyway = Confirm::new()
+                .with_prompt("Continue with this token anyway?")
+                .default(false)
+                .interact()?;
+            
+            if !continue_anyway {
+                continue;
+            }
+        }
+        
+        break input_token;
     };
 
     // ── 2. Agent Identity ────────────────────────────────────────────
@@ -112,28 +115,17 @@ pub async fn run() -> Result<()> {
     fs::create_dir_all(home.join("projects"))?;
     fs::create_dir_all(home.join("memory"))?;
 
-    let config = Config {
+    let mut config = Config {
         llm: LlmConfig {
             provider: "anthropic".to_string(),
             model: "claude-opus-4-5-20251101".to_string(),
             api_key: None, // Legacy field - not used in new format
         },
-        auth: if auth_method == AuthMethod::OAuth {
-            AuthConfig {
-                method: AuthMethod::OAuth,
-                oauth: oauth_config,
-                api_key: None,
-            }
-        } else {
-            AuthConfig {
-                method: AuthMethod::ApiKey,
-                oauth: None,
-                api_key: Some(ApiKeyConfig {
-                    key: api_key.unwrap(), // Safe because we set it in API key flow
-                }),
-            }
-        },
+        auth: AuthConfig::default(),
     };
+    
+    // Auto-detect token type and configure auth
+    config.setup_token_auto_detect(token)?;
     config.save()?;
     println!("  ✅ config.toml");
 
@@ -224,64 +216,4 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-async fn setup_manual_auth() -> Result<(AuthMethod, Option<OAuthConfig>, Option<String>)> {
-    let auth_methods = vec![
-        "API Key (Pay-per-token) - Recommended for new users",
-        "OAuth (Claude Pro/Max subscription) - Not currently supported",
-    ];
 
-    let auth_choice = dialoguer::Select::new()
-        .with_prompt("Select authentication method")
-        .items(&auth_methods)
-        .default(0)
-        .interact()?;
-
-    if auth_choice == 0 {
-        // API Key flow  
-        println!("\n{}", style("Setting up API key authentication...").cyan());
-        println!("You need an Anthropic API key. Get one at: https://console.anthropic.com/\n");
-        
-        let api_key = setup_api_key_auth()?;
-        Ok((AuthMethod::ApiKey, None, Some(api_key)))
-    } else {
-        // OAuth not currently supported through manual flow
-        println!("\n{}", style("OAuth authentication is currently only supported through Claude Code import.").yellow());
-        println!("Install Claude Code from https://claude.ai/code to use OAuth, then run 'imp bootstrap' again.\n");
-        println!("Falling back to API key authentication...");
-        
-        let api_key = setup_api_key_auth()?;
-        Ok((AuthMethod::ApiKey, None, Some(api_key)))
-    }
-}
-
-fn setup_api_key_auth() -> Result<String> {
-    loop {
-        let key = Password::new()
-            .with_prompt("Enter your Anthropic API key")
-            .interact()?;
-        
-        if key.trim().is_empty() {
-            println!("{}", style("❌ API key cannot be empty").red());
-            continue;
-        }
-        
-        if !key.starts_with("sk-ant-") {
-            println!(
-                "{}",
-                style("⚠️  Warning: key doesn't look like an Anthropic key (should start with 'sk-ant-')")
-                    .yellow()
-            );
-            
-            let continue_anyway = Confirm::new()
-                .with_prompt("Continue with this key anyway?")
-                .default(false)
-                .interact()?;
-            
-            if !continue_anyway {
-                continue;
-            }
-        }
-        
-        break Ok(key);
-    }
-}

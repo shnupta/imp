@@ -1,5 +1,4 @@
 use crate::config::{AuthMethod, Config};
-use crate::claude_code;
 use crate::error::{ImpError, Result};
 use futures::stream::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -93,30 +92,9 @@ impl ClaudeClient {
         })
     }
 
-    /// Ensure we have a valid access token, refreshing if necessary
+    /// Ensure we have a valid token (setup-tokens are long-lived, no refresh needed)
     async fn ensure_valid_token(&mut self) -> Result<()> {
-        if self.config.auth_method() == &AuthMethod::OAuth {
-            if self.config.is_oauth_token_expired() {
-                self.refresh_oauth_token().await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Refresh the OAuth access token
-    async fn refresh_oauth_token(&mut self) -> Result<()> {
-        let oauth_config = self.config.oauth_config()
-            .ok_or_else(|| ImpError::Config("OAuth configuration missing".to_string()))?;
-
-        let new_tokens = claude_code::refresh_oauth_tokens(&oauth_config.refresh_token).await?;
-
-        // Update config with new tokens
-        self.config.update_oauth_tokens(
-            new_tokens.access_token,
-            new_tokens.refresh_token,
-            new_tokens.expires_at,
-        )?;
-
+        // Setup-tokens from `claude setup-token` are long-lived and don't need refresh
         Ok(())
     }
 
@@ -141,6 +119,23 @@ impl ClaudeClient {
                 headers.insert(
                     AUTHORIZATION,
                     HeaderValue::from_str(&format!("Bearer {}", oauth_config.access_token))?,
+                );
+                // Add required OAuth headers
+                headers.insert(
+                    "anthropic-beta",
+                    HeaderValue::from_static("claude-code-20250219,oauth-2025-04-20"),
+                );
+                headers.insert(
+                    "user-agent",
+                    HeaderValue::from_static("claude-cli/1.0.0 (external, cli)"),
+                );
+                headers.insert(
+                    "x-app",
+                    HeaderValue::from_static("cli"),
+                );
+                headers.insert(
+                    "anthropic-dangerous-direct-browser-access",
+                    HeaderValue::from_static("true"),
                 );
             }
         }

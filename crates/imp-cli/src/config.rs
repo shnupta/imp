@@ -118,6 +118,13 @@ impl Config {
                         "API key doesn't look like a valid Anthropic key (should start with 'sk-ant-')".to_string()
                     ));
                 }
+                
+                // If user has an OAuth token in the API key field, auto-switch to OAuth
+                if api_key_config.key.starts_with("sk-ant-oat") {
+                    return Err(ImpError::Config(
+                        "You have an OAuth token but API key auth is configured. Run 'imp login' to switch to OAuth.".to_string()
+                    ));
+                }
             }
             AuthMethod::OAuth => {
                 if config.auth.oauth.is_none() {
@@ -182,6 +189,31 @@ impl Config {
         } else {
             true
         }
+    }
+
+    /// Detect token type from token string and update config accordingly
+    pub fn setup_token_auto_detect(&mut self, token: String) -> Result<()> {
+        if token.starts_with("sk-ant-oat") {
+            // OAuth token - store as OAuth
+            self.auth.method = AuthMethod::OAuth;
+            self.auth.oauth = Some(OAuthConfig {
+                access_token: token,
+                refresh_token: String::new(), // setup-token doesn't need refresh
+                expires_at: chrono::Utc::now().timestamp() + 365 * 24 * 60 * 60, // 1 year
+            });
+            self.auth.api_key = None;
+        } else if token.starts_with("sk-ant-api") {
+            // API key - store as API key
+            self.auth.method = AuthMethod::ApiKey;
+            self.auth.api_key = Some(ApiKeyConfig { key: token });
+            self.auth.oauth = None;
+        } else {
+            return Err(ImpError::Config(
+                "Token doesn't look like a valid Anthropic token (should start with 'sk-ant-api' or 'sk-ant-oat')".to_string()
+            ));
+        }
+        
+        self.save()
     }
 }
 

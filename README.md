@@ -16,9 +16,9 @@ Imp is an AI agent that acts as both a **coding partner** and **work organizer**
 ### Prerequisites
 
 - Rust (install from [rustup.rs](https://rustup.rs/))
-- **Authentication** (choose one):
-  - **Claude Code OAuth**: If you have Claude Code installed and authenticated (automatically detected)
-  - **API Key**: Anthropic API key from [console.anthropic.com](https://console.anthropic.com/)
+- **Authentication**:
+  - Install Claude Code CLI from [claude.ai/code](https://claude.ai/code)
+  - Run `claude setup-token` to get your authentication token
 - Optional: `ripgrep` for better code search (install via your package manager or [GitHub](https://github.com/BurntSushi/ripgrep))
 
 **System Requirements:**
@@ -41,31 +41,25 @@ After installation, `imp` will be available from anywhere in your terminal.
 
 ## Authentication
 
-Imp supports multiple authentication methods:
+Imp uses Anthropic tokens for authentication. The setup is simple:
 
-### Claude Code Integration (Recommended)
-If you have [Claude Code](https://claude.ai/code) installed and authenticated, imp will automatically detect and import your existing OAuth credentials:
+### Get Your Token
+1. **Install Claude Code CLI**: Visit [claude.ai/code](https://claude.ai/code) and install the CLI
+2. **Get your token**: Run `claude setup-token` in your terminal
+3. **Copy the token**: The command will output a token starting with `sk-ant-`
 
+### Configure Imp
 ```bash
-imp bootstrap  # Automatically detects Claude Code credentials
+imp bootstrap  # Paste your token during setup
 # or
-imp login      # Import Claude Code credentials later
+imp login      # Update authentication later
 ```
 
-This uses your Claude Pro/Max subscription through the same OAuth tokens that Claude Code uses.
+### Token Types (Auto-detected)
+- **OAuth tokens** (`sk-ant-oat*`): Use your Claude Pro/Max subscription
+- **API keys** (`sk-ant-api*`): Pay-per-token usage
 
-### API Key
-Use your Anthropic API key for pay-per-token usage:
-
-```bash
-imp bootstrap  # Choose API Key if Claude Code not found
-# or provide API key manually
-```
-
-### How it works
-1. **First choice**: If `~/.claude/.credentials.json` exists (Claude Code), imp offers to import those OAuth tokens
-2. **Fallback**: If no Claude Code credentials found, imp prompts for an API key
-3. **Manual switching**: Use `imp login` anytime to change authentication methods
+Imp automatically detects which type you have and configures the appropriate authentication headers.
 
 ## First-time Setup
 
@@ -141,9 +135,9 @@ command = "git status --porcelain"
 
 ## Configuration
 
-Config is stored at `~/.imp/config.toml`. The format depends on your authentication method:
+Config is stored at `~/.imp/config.toml`. The format depends on your token type:
 
-### OAuth Configuration
+### OAuth Configuration (Claude Pro/Max)
 ```toml
 [llm]
 provider = "anthropic"
@@ -153,12 +147,12 @@ model = "claude-opus-4-5-20251101"
 method = "oauth"
 
 [auth.oauth]
-access_token = "..."
-refresh_token = "..."
+access_token = "sk-ant-oat..."  # Your setup-token
+refresh_token = ""
 expires_at = 1234567890
 ```
 
-### API Key Configuration
+### API Key Configuration (Pay-per-token)
 ```toml
 [llm]
 provider = "anthropic" 
@@ -168,13 +162,13 @@ model = "claude-opus-4-5-20251101"
 method = "api_key"
 
 [auth.api_key]
-key = "sk-ant-..."
+key = "sk-ant-api..."  # Your setup-token
 ```
 
 **Note**: 
-- OAuth tokens (from Claude Code) are automatically refreshed when they expire
-- API keys don't expire but bill per usage
-- Claude Code credentials are imported from `~/.claude/.credentials.json`
+- Setup-tokens from `claude setup-token` are long-lived and don't need refresh
+- Token type is automatically detected from the `sk-ant-` prefix
+- Both use the same `claude setup-token` command - the type depends on your Claude account
 
 ## Examples
 

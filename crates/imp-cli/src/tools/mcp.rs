@@ -265,6 +265,7 @@ impl McpServer {
 
         let resp = req_builder
             .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
             .body(body)
             .send()
             .await

@@ -248,6 +248,69 @@ impl McpServer {
             })),
         };
         self.http_send(&request).await?;
+
+        // Send notifications/initialized (required by MCP spec)
+        self.http_send_notification("notifications/initialized", json!({})).await?;
+        Ok(())
+    }
+
+    /// Send a JSON-RPC notification (no id, no response expected).
+    async fn http_send_notification(&mut self, method: &str, params: Value) -> Result<()> {
+        let url = self.config.url.as_ref().ok_or_else(|| {
+            ImpError::Tool(format!("MCP '{}': missing url for HTTP transport", self.name))
+        })?;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| ImpError::Tool(format!("MCP '{}': HTTP client error: {}", self.name, e)))?;
+        let mut req_builder = client.post(url);
+
+        for (key, value) in &self.config.headers {
+            req_builder = req_builder.header(key, expand_env_var(value));
+        }
+        if let Some(ref sid) = self.session_id {
+            req_builder = req_builder.header("Mcp-Session-Id", sid);
+        }
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        });
+
+        let _ = req_builder
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(serde_json::to_string(&body).unwrap_or_default())
+            .send()
+            .await;
+
+        Ok(())
+    }
+
+    /// Send a JSON-RPC notification over stdio (no id, no response expected).
+    async fn stdio_send_notification(&mut self, method: &str, params: Value) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let child = self.child.as_mut().ok_or_else(|| {
+            ImpError::Tool(format!("MCP '{}': process not running", self.name))
+        })?;
+        let stdin = child.stdin.as_mut().ok_or_else(|| {
+            ImpError::Tool(format!("MCP '{}': stdin not available", self.name))
+        })?;
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        });
+
+        stdin.write_all(format!("{}\n", body).as_bytes()).await
+            .map_err(|e| ImpError::Tool(format!("MCP '{}': write error: {}", self.name, e)))?;
+        stdin.flush().await
+            .map_err(|e| ImpError::Tool(format!("MCP '{}': flush error: {}", self.name, e)))?;
+
         Ok(())
     }
 
@@ -373,6 +436,9 @@ impl McpServer {
             })),
         };
         self.stdio_send(&request).await?;
+
+        // Send notifications/initialized (required by MCP spec)
+        self.stdio_send_notification("notifications/initialized", json!({})).await?;
         Ok(())
     }
 

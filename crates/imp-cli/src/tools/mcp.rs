@@ -255,7 +255,11 @@ impl McpServer {
             ImpError::Tool(format!("MCP '{}': missing url for HTTP transport", self.name))
         })?;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| ImpError::Tool(format!("MCP '{}': HTTP client error: {}", self.name, e)))?;
         let mut req_builder = client.post(url);
 
         // Add headers with env var expansion
@@ -277,7 +281,15 @@ impl McpServer {
             .body(body)
             .send()
             .await
-            .map_err(|e| ImpError::Tool(format!("MCP '{}': HTTP error: {}", self.name, e)))?;
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ImpError::Tool(format!("MCP '{}': connection timed out (10s connect / 30s total)", self.name))
+                } else if e.is_connect() {
+                    ImpError::Tool(format!("MCP '{}': connection refused — is the server running? ({})", self.name, e))
+                } else {
+                    ImpError::Tool(format!("MCP '{}': HTTP error: {}", self.name, e))
+                }
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -392,13 +404,25 @@ impl McpServer {
 
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| ImpError::Tool(format!("MCP '{}': read error: {}", self.name, e)))?;
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            reader.read_line(&mut line),
+        ).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(ImpError::Tool(format!("MCP '{}': read error: {}", self.name, e))),
+            Err(_) => return Err(ImpError::Tool(format!("MCP '{}': timed out waiting for response (30s)", self.name))),
+        }
+
+        if line.trim().is_empty() {
+            return Err(ImpError::Tool(format!("MCP '{}': server returned empty response", self.name)));
+        }
 
         serde_json::from_str(&line)
-            .map_err(|e| ImpError::Tool(format!("MCP '{}': parse error: {}", self.name, e)))
+            .map_err(|e| ImpError::Tool(format!(
+                "MCP '{}': failed to parse response: {} — raw: {}",
+                self.name, e, &line[..line.len().min(200)]
+            )))
     }
 }
 
@@ -442,12 +466,23 @@ impl McpRegistry {
                 continue;
             }
 
+            let transport = if config.is_remote() {
+                let url = config.url.as_deref().unwrap_or("?");
+                format!("http → {}", url)
+            } else {
+                let cmd = config.command.as_deref().unwrap_or("?");
+                let args = config.args.join(" ");
+                if args.is_empty() { format!("stdio → {}", cmd) }
+                else { format!("stdio → {} {}", cmd, args) }
+            };
+            eprintln!("  MCP '{}': connecting ({})...", name, transport);
+
             let mut server = McpServer::new(name.clone(), config.clone());
 
             match server.start().await {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("⚠ MCP '{}': failed to start: {}", name, e);
+                    eprintln!("  ⚠ MCP '{}': initialize failed: {}", name, e);
                     continue;
                 }
             }
@@ -456,16 +491,20 @@ impl McpRegistry {
                 Ok(tools) => {
                     let server_idx = self.servers.len();
                     let tool_count = tools.len();
+                    let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
 
                     for tool in &tools {
                         self.tool_routing.insert(tool.name.clone(), server_idx);
                     }
 
                     self.servers.push(server);
-                    eprintln!("✅ MCP '{}': {} tool(s) loaded", name, tool_count);
+                    eprintln!("  ✅ MCP '{}': {} tool(s) — {}", name, tool_count,
+                        if tool_names.len() <= 5 { tool_names.join(", ") }
+                        else { format!("{}, ... +{} more", tool_names[..4].join(", "), tool_names.len() - 4) }
+                    );
                 }
                 Err(e) => {
-                    eprintln!("⚠ MCP '{}': failed to list tools: {}", name, e);
+                    eprintln!("  ⚠ MCP '{}': list tools failed: {}", name, e);
                 }
             }
         }

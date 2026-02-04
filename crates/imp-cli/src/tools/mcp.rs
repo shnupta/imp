@@ -503,11 +503,22 @@ impl Drop for McpServer {
 
 // ── MCP Registry ─────────────────────────────────────────────────────
 
+/// Result of initializing a single MCP server in the background.
+struct McpInitResult {
+    name: String,
+    server: McpServer,
+    tools: Vec<McpTool>,
+}
+
 /// Manages all MCP server connections and routes tool calls.
+/// Supports background initialization — servers connect in parallel
+/// and their tools become available before the first LLM call.
 pub struct McpRegistry {
     servers: Vec<McpServer>,
     /// Maps tool name → index into servers vec
     tool_routing: HashMap<String, usize>,
+    /// Background init tasks that haven't been resolved yet
+    pending: Vec<tokio::task::JoinHandle<Option<McpInitResult>>>,
 }
 
 impl McpRegistry {
@@ -515,63 +526,97 @@ impl McpRegistry {
         Self {
             servers: Vec::new(),
             tool_routing: HashMap::new(),
+            pending: Vec::new(),
         }
     }
 
-    /// Initialize MCP servers from config. Starts each server and discovers tools.
-    pub async fn load_from_config(
+    /// Spawn MCP server initialization in the background.
+    /// Servers connect and discover tools in parallel tokio tasks.
+    /// Call `resolve_pending()` before the first LLM call to collect results.
+    pub fn load_from_config_background(
         &mut self,
         mcp_configs: &HashMap<String, McpServerConfig>,
-    ) -> Result<()> {
+    ) {
         for (name, config) in mcp_configs {
-            // Validate: must have either url or command
             if config.url.is_none() && config.command.is_none() {
                 eprintln!(
-                    "⚠ MCP '{}': needs either 'url' (SSE) or 'command' (stdio), skipping",
+                    "⚠ MCP '{}': needs either 'url' or 'command', skipping",
                     name
                 );
                 continue;
             }
 
-            let mut server = McpServer::new(name.clone(), config.clone());
+            let name = name.clone();
+            let config = config.clone();
 
-            match server.start().await {
-                Ok(()) => {}
-                Err(e) => {
+            let handle = tokio::spawn(async move {
+                let mut server = McpServer::new(name.clone(), config);
+
+                if let Err(e) = server.start().await {
                     eprintln!("  ⚠ MCP '{}': initialize failed: {}", name, e);
-                    continue;
+                    return None;
                 }
-            }
 
-            match server.list_tools().await {
-                Ok(tools) => {
-                    let server_idx = self.servers.len();
-                    let tool_count = tools.len();
-                    let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-
-                    for tool in &tools {
-                        self.tool_routing.insert(tool.name.clone(), server_idx);
+                match server.list_tools().await {
+                    Ok(tools) => {
+                        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+                        let tool_count = tools.len();
+                        eprintln!("  ✅ MCP '{}': {} tool(s) — {}", name, tool_count,
+                            if tool_names.len() <= 5 { tool_names.join(", ") }
+                            else { format!("{}, ... +{} more", tool_names[..4].join(", "), tool_names.len() - 4) }
+                        );
+                        Some(McpInitResult { name, server, tools })
                     }
+                    Err(e) => {
+                        eprintln!("  ⚠ MCP '{}': list tools failed: {}", name, e);
+                        None
+                    }
+                }
+            });
 
-                    self.servers.push(server);
-                    eprintln!("  ✅ MCP '{}': {} tool(s) — {}", name, tool_count,
-                        if tool_names.len() <= 5 { tool_names.join(", ") }
-                        else { format!("{}, ... +{} more", tool_names[..4].join(", "), tool_names.len() - 4) }
-                    );
-                }
-                Err(e) => {
-                    eprintln!("  ⚠ MCP '{}': list tools failed: {}", name, e);
-                }
-            }
+            self.pending.push(handle);
+        }
+    }
+
+    /// Resolve any pending background MCP init tasks.
+    /// Waits up to `timeout` for all pending servers to finish.
+    /// Called automatically before the first LLM call via `get_tool_schemas()`.
+    pub async fn resolve_pending(&mut self) {
+        if self.pending.is_empty() {
+            return;
         }
 
-        Ok(())
+        let handles = std::mem::take(&mut self.pending);
+
+        // Wait for all pending tasks with a timeout
+        let results = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            futures::future::join_all(handles),
+        ).await {
+            Ok(results) => results,
+            Err(_) => {
+                eprintln!("⚠ MCP: timed out waiting for servers (30s)");
+                return;
+            }
+        };
+
+        for result in results {
+            if let Ok(Some(init)) = result {
+                let server_idx = self.servers.len();
+                for tool in &init.tools {
+                    self.tool_routing.insert(tool.name.clone(), server_idx);
+                }
+                self.servers.push(init.server);
+            }
+        }
     }
 
     /// Get Anthropic-formatted tool schemas for all MCP tools.
+    /// Resolves any pending background init tasks first.
     pub async fn get_tool_schemas(&mut self) -> Vec<Value> {
-        let mut schemas = Vec::new();
+        self.resolve_pending().await;
 
+        let mut schemas = Vec::new();
         for server in &mut self.servers {
             if let Ok(tools) = server.list_tools().await {
                 for tool in tools {
@@ -588,7 +633,10 @@ impl McpRegistry {
     }
 
     /// Call a tool, routing to the correct MCP server.
+    /// Resolves any pending background init tasks first.
     pub async fn call_tool(&mut self, tool_name: &str, arguments: &Value) -> Result<String> {
+        self.resolve_pending().await;
+
         let server_idx = self
             .tool_routing
             .get(tool_name)

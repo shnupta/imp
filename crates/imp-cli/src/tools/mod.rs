@@ -116,12 +116,10 @@ impl ToolRegistry {
             }
         }
 
-        // Load MCP servers from ~/.imp/.mcp.json
+        // Load MCP servers from ~/.imp/.mcp.json (background — non-blocking)
         match mcp::load_mcp_config() {
             Ok(mcp_configs) if !mcp_configs.is_empty() => {
-                if let Err(e) = self.mcp_registry.load_from_config(&mcp_configs).await {
-                    eprintln!("⚠ Failed to load MCP servers: {}", e);
-                }
+                self.mcp_registry.load_from_config_background(&mcp_configs);
             }
             Err(e) => eprintln!("⚠ Failed to read .mcp.json: {}", e),
             _ => {}
@@ -172,9 +170,7 @@ impl ToolRegistry {
 
         match mcp::load_mcp_config() {
             Ok(mcp_configs) if !mcp_configs.is_empty() => {
-                if let Err(e) = self.mcp_registry.load_from_config(&mcp_configs).await {
-                    eprintln!("⚠ Failed to load MCP servers for subagent: {}", e);
-                }
+                self.mcp_registry.load_from_config_background(&mcp_configs);
             }
             Err(e) => eprintln!("⚠ Failed to read .mcp.json: {}", e),
             _ => {}

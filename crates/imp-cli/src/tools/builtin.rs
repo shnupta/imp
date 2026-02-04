@@ -11,6 +11,7 @@ pub async fn execute_builtin(tool_name: &str, arguments: &Value) -> Result<Strin
         "file_edit" => file_edit(arguments).await,
         "search_code" => search_code(arguments).await,
         "list_files" => list_files(arguments).await,
+        "queue_knowledge" => queue_knowledge(arguments).await,
         // spawn_agent and check_agents are intercepted by Agent before reaching here.
         // If they somehow arrive, return an informative error.
         "spawn_agent" | "check_agents" => {
@@ -308,4 +309,36 @@ async fn list_files(arguments: &Value) -> Result<String> {
         Ok(format!("Error listing files in '{}': {}", path, 
                    String::from_utf8_lossy(&output.stderr)))
     }
+}
+
+async fn queue_knowledge(arguments: &Value) -> Result<String> {
+    let content = arguments.get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ImpError::Tool("Missing 'content' parameter".to_string()))?;
+
+    let session_id = arguments.get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let suggested_entities: Vec<String> = arguments
+        .get("suggested_entities")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    crate::knowledge::append_to_queue(content, session_id, suggested_entities)?;
+
+    Ok(format!(
+        "Queued knowledge for later processing: \"{}\" (session: {})",
+        if content.len() > 80 {
+            format!("{}...", &content[..77])
+        } else {
+            content.to_string()
+        },
+        session_id
+    ))
 }

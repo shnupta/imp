@@ -140,6 +140,7 @@ impl ToolRegistry {
             self.create_list_files_tool(),
             self.create_spawn_agent_tool(),
             self.create_check_agents_tool(),
+            self.create_queue_knowledge_tool(),
         ];
 
         for tool in builtins {
@@ -157,6 +158,7 @@ impl ToolRegistry {
             self.create_file_edit_tool(),
             self.create_search_code_tool(),
             self.create_list_files_tool(),
+            self.create_queue_knowledge_tool(),
         ];
 
         for tool in builtins {
@@ -604,6 +606,42 @@ impl ToolRegistry {
                 name: "check_agents".to_string(),
                 description: "Check on spawned sub-agents. Lists active sub-agents and their status, and returns results from any that have completed.".to_string(),
                 parameters: HashMap::new(),
+            },
+            handler: ToolHandler {
+                kind: "builtin".to_string(),
+                command: None,
+                script: None,
+            },
+        }
+    }
+
+    fn create_queue_knowledge_tool(&self) -> ToolDefinition {
+        ToolDefinition {
+            tool: ToolMeta {
+                name: "queue_knowledge".to_string(),
+                description: "Flag content from the conversation for later processing into the knowledge graph. Use this when you encounter important facts, entities, or relationships worth remembering long-term. The content will be queued and processed during the next reflect cycle.".to_string(),
+                parameters: {
+                    let mut params = HashMap::new();
+                    params.insert("content".to_string(), ParameterDef {
+                        param_type: "string".to_string(),
+                        required: true,
+                        default: None,
+                        description: Some("The content/fact to queue for knowledge extraction. Should be a clear, self-contained statement.".to_string()),
+                    });
+                    params.insert("session_id".to_string(), ParameterDef {
+                        param_type: "string".to_string(),
+                        required: false,
+                        default: Some(Value::String("unknown".to_string())),
+                        description: Some("The current session ID for tracking provenance.".to_string()),
+                    });
+                    params.insert("suggested_entities".to_string(), ParameterDef {
+                        param_type: "array".to_string(),
+                        required: false,
+                        default: Some(Value::Array(vec![])),
+                        description: Some("Optional list of entity names you think are mentioned in the content.".to_string()),
+                    });
+                    params
+                },
             },
             handler: ToolHandler {
                 kind: "builtin".to_string(),

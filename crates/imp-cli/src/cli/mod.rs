@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod chat;
+pub mod knowledge_cmd;
 pub mod learn;
 pub mod login;
 pub mod oneshot;

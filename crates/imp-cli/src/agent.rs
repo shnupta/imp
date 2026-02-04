@@ -87,7 +87,7 @@ impl Agent {
 
         let mut tools = ToolRegistry::new();
         let tools_dir = crate::config::imp_home()?.join("tools");
-        tools.load_from_directory(tools_dir, &config).await?;
+        tools.load_from_directory(tools_dir).await?;
 
         // Open SQLite database and create a new session
         let db = Database::open()?;

@@ -76,7 +76,6 @@ impl ToolRegistry {
     pub async fn load_from_directory<P: AsRef<Path>>(
         &mut self,
         tools_dir: P,
-        config: &crate::config::Config,
     ) -> Result<()> {
         let tools_dir = tools_dir.as_ref();
 
@@ -117,11 +116,15 @@ impl ToolRegistry {
             }
         }
 
-        // Load MCP servers from config.toml [mcp] section
-        if !config.mcp.is_empty() {
-            if let Err(e) = self.mcp_registry.load_from_config(&config.mcp).await {
-                eprintln!("⚠ Failed to load MCP servers: {}", e);
+        // Load MCP servers from ~/.imp/.mcp.json
+        match mcp::load_mcp_config() {
+            Ok(mcp_configs) if !mcp_configs.is_empty() => {
+                if let Err(e) = self.mcp_registry.load_from_config(&mcp_configs).await {
+                    eprintln!("⚠ Failed to load MCP servers: {}", e);
+                }
             }
+            Err(e) => eprintln!("⚠ Failed to read .mcp.json: {}", e),
+            _ => {}
         }
 
         Ok(())
@@ -164,16 +167,17 @@ impl ToolRegistry {
     }
 
     /// Load subagent builtins + MCP tools from config.
-    pub async fn load_subagent_builtins_with_mcp(
-        &mut self,
-        config: &crate::config::Config,
-    ) -> Result<()> {
+    pub async fn load_subagent_builtins_with_mcp(&mut self) -> Result<()> {
         self.load_subagent_builtins();
 
-        if !config.mcp.is_empty() {
-            if let Err(e) = self.mcp_registry.load_from_config(&config.mcp).await {
-                eprintln!("⚠ Failed to load MCP servers for subagent: {}", e);
+        match mcp::load_mcp_config() {
+            Ok(mcp_configs) if !mcp_configs.is_empty() => {
+                if let Err(e) = self.mcp_registry.load_from_config(&mcp_configs).await {
+                    eprintln!("⚠ Failed to load MCP servers for subagent: {}", e);
+                }
             }
+            Err(e) => eprintln!("⚠ Failed to read .mcp.json: {}", e),
+            _ => {}
         }
 
         Ok(())

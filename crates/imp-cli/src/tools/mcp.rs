@@ -1,28 +1,93 @@
 //! MCP (Model Context Protocol) client for Imp.
 //!
 //! Supports two transports, auto-detected from config:
-//! - **SSE**: Remote server at a URL (HTTP POST + Server-Sent Events)
+//! - **HTTP/SSE**: Remote server at a URL
 //! - **Stdio**: Local subprocess (JSON-RPC over stdin/stdout)
 //!
-//! Configured in config.toml:
-//! ```toml
-//! [mcp.github]
-//! url = "http://localhost:3456"
-//!
-//! [mcp.github.headers]
-//! Authorization = "Bearer ${GITHUB_TOKEN}"
-//!
-//! [mcp.filesystem]
-//! command = "npx"
-//! args = ["-y", "@modelcontextprotocol/server-filesystem"]
+//! Configured via `~/.imp/.mcp.json` (Claude-compatible format):
+//! ```json
+//! {
+//!   "mcpServers": {
+//!     "github": {
+//!       "command": "npx",
+//!       "args": ["-y", "@modelcontextprotocol/server-github"],
+//!       "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+//!     },
+//!     "api": {
+//!       "type": "http",
+//!       "url": "https://mcp.example.com/mcp",
+//!       "headers": { "Authorization": "Bearer ${API_KEY}" }
+//!     }
+//!   }
+//! }
 //! ```
 
-use crate::config::McpServerConfig;
+use crate::config::imp_home;
 use crate::error::{ImpError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+// ── MCP config types ─────────────────────────────────────────────────
+
+/// Claude-compatible `.mcp.json` file format.
+#[derive(Debug, Deserialize)]
+pub struct McpJsonFile {
+    #[serde(rename = "mcpServers", default)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
+}
+
+/// Configuration for an MCP server.
+/// Transport is auto-detected: `url` → HTTP/SSE, `command` → stdio.
+#[derive(Debug, Deserialize, Clone)]
+pub struct McpServerConfig {
+    /// Transport type hint (optional). Values: "http", "sse", "stdio".
+    /// Auto-detected from url/command if omitted.
+    #[serde(rename = "type")]
+    pub transport_type: Option<String>,
+    /// HTTP/SSE transport: URL of the MCP server
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Stdio transport: command to spawn
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Stdio transport: arguments for the command
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables (supports ${VAR} and ${VAR:-default} expansion)
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// HTTP headers for HTTP/SSE transport (supports ${VAR} expansion)
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+impl McpServerConfig {
+    /// Whether this is an HTTP/SSE (remote) or stdio (subprocess) server.
+    pub fn is_remote(&self) -> bool {
+        self.url.is_some()
+            || self.transport_type.as_deref() == Some("http")
+            || self.transport_type.as_deref() == Some("sse")
+    }
+}
+
+/// Load MCP server configs from `~/.imp/.mcp.json`.
+/// Returns an empty map if the file doesn't exist.
+pub fn load_mcp_config() -> Result<HashMap<String, McpServerConfig>> {
+    let path = imp_home()?.join(".mcp.json");
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| ImpError::Config(format!("Failed to read .mcp.json: {}", e)))?;
+
+    let file: McpJsonFile = serde_json::from_str(&content)
+        .map_err(|e| ImpError::Config(format!("Failed to parse .mcp.json: {}", e)))?;
+
+    Ok(file.mcp_servers)
+}
 
 // ── JSON-RPC types ───────────────────────────────────────────────────
 
@@ -88,7 +153,7 @@ impl McpServer {
 
     /// Start the server connection and run the MCP initialize handshake.
     pub async fn start(&mut self) -> Result<()> {
-        if self.config.is_sse() {
+        if self.config.is_remote() {
             // SSE: just do the initialize handshake via HTTP
             self.sse_initialize().await?;
         } else {
@@ -149,7 +214,7 @@ impl McpServer {
 
     /// Route a request to the appropriate transport.
     async fn send_request(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-        let response = if self.config.is_sse() {
+        let response = if self.config.is_remote() {
             self.sse_send(request).await?
         } else {
             self.stdio_send(request).await?

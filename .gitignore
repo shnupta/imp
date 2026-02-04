@@ -22,3 +22,4 @@ web/dist/
 # Local data
 *.db
 *.db-journal
+TASK.md

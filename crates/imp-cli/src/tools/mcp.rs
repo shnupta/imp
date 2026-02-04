@@ -96,7 +96,8 @@ struct JsonRpcRequest {
     jsonrpc: String,
     id: u64,
     method: String,
-    params: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,7 +175,7 @@ impl McpServer {
             jsonrpc: "2.0".to_string(),
             id,
             method: "tools/list".to_string(),
-            params: json!({}),
+            params: None,
         };
 
         let response = self.send_request(&request).await?;
@@ -194,7 +195,7 @@ impl McpServer {
             jsonrpc: "2.0".to_string(),
             id,
             method: "tools/call".to_string(),
-            params: json!({ "name": tool_name, "arguments": arguments }),
+            params: Some(json!({ "name": tool_name, "arguments": arguments })),
         };
 
         let response = self.send_request(&request).await?;
@@ -240,11 +241,11 @@ impl McpServer {
             jsonrpc: "2.0".to_string(),
             id,
             method: "initialize".to_string(),
-            params: json!({
+            params: Some(json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
                 "clientInfo": { "name": "imp", "version": "0.1.0" }
-            }),
+            })),
         };
         self.http_send(&request).await?;
         Ok(())
@@ -365,11 +366,11 @@ impl McpServer {
             jsonrpc: "2.0".to_string(),
             id,
             method: "initialize".to_string(),
-            params: json!({
+            params: Some(json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
                 "clientInfo": { "name": "imp", "version": "0.1.0" }
-            }),
+            })),
         };
         self.stdio_send(&request).await?;
         Ok(())
@@ -465,17 +466,6 @@ impl McpRegistry {
                 );
                 continue;
             }
-
-            let transport = if config.is_remote() {
-                let url = config.url.as_deref().unwrap_or("?");
-                format!("http → {}", url)
-            } else {
-                let cmd = config.command.as_deref().unwrap_or("?");
-                let args = config.args.join(" ");
-                if args.is_empty() { format!("stdio → {}", cmd) }
-                else { format!("stdio → {} {}", cmd, args) }
-            };
-            eprintln!("  MCP '{}': connecting ({})...", name, transport);
 
             let mut server = McpServer::new(name.clone(), config.clone());
 

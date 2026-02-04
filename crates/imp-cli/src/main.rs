@@ -16,6 +16,7 @@ mod context;
 mod db;
 mod embeddings;
 mod error;
+mod extraction;
 mod highlight;
 mod knowledge;
 mod logging;

@@ -707,6 +707,158 @@ impl KnowledgeGraph {
         Ok(())
     }
 
+    /// Retrieve relevant context for a query: chunks + related entities.
+    /// Returns a formatted string ready to append to the system prompt.
+    pub fn retrieve_context(&self, query: &str, max_chunks: usize, max_entities: usize) -> Result<String> {
+        let mut context = String::new();
+
+        // 1. Semantic search for relevant chunks
+        let chunks = self.search_similar(query, max_chunks)?;
+        if !chunks.is_empty() {
+            context.push_str("## Retrieved Knowledge\n\n");
+            
+            for (i, chunk) in chunks.iter().take(max_chunks).enumerate() {
+                if i > 0 {
+                    context.push('\n');
+                }
+                context.push_str(&format!("> {}\n", chunk.content));
+            }
+        }
+
+        // 2. Find entities mentioned in the query using simple keyword matching
+        let query_lower = query.to_lowercase();
+        let mut mentioned_entities = Vec::new();
+        
+        // Get all entities and check if their names appear in the query
+        let entities_result = self.run_query(
+            "?[id, entity_type, name] := *entity{id, entity_type, name}",
+            BTreeMap::new(),
+        )?;
+        
+        for row in &entities_result.rows {
+            if row.len() >= 3 {
+                let entity_name = dv_to_string(&row[2]);
+                if query_lower.contains(&entity_name.to_lowercase()) {
+                    mentioned_entities.push((
+                        dv_to_string(&row[0]), // id
+                        dv_to_string(&row[1]), // type
+                        entity_name,           // name
+                    ));
+                }
+            }
+        }
+
+        // 3. For mentioned entities, get their relationships
+        if !mentioned_entities.is_empty() && !context.is_empty() {
+            context.push_str("\n");
+        }
+        
+        for (entity_id, entity_type, entity_name) in mentioned_entities.into_iter().take(max_entities) {
+            if context.is_empty() {
+                context.push_str("## Retrieved Knowledge\n\n");
+            } else if !context.contains("**Entities:**") {
+                context.push_str("**Entities:**\n");
+            }
+            
+            // Get related entities
+            let related = self.get_related(&entity_name, 1)?;
+            
+            context.push_str(&format!("- **{}** ({})", entity_name, entity_type));
+            if !related.is_empty() {
+                let connections: Vec<String> = related.iter().take(3).map(|r| {
+                    format!("{} {} {}", 
+                        if r.direction == "->" { "" } else { "←" },
+                        r.rel_type,
+                        r.entity.name
+                    )
+                }).collect();
+                context.push_str(&format!(": {}", connections.join(", ")));
+            }
+            context.push('\n');
+        }
+
+        Ok(context)
+    }
+
+    /// Retrieve formatted context relevant to a query, ready to append to system prompt.
+    /// Returns empty string if nothing relevant found.
+    pub fn retrieve_context(&self, query: &str, max_chunks: usize, max_entities: usize) -> Result<String> {
+        // 1. Search for similar chunks
+        let chunks = self.search_similar(query, max_chunks)?;
+        
+        if chunks.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut context_parts = Vec::new();
+        let mut mentioned_entities = Vec::new();
+
+        // 2. Find entities mentioned in chunks and collect related entities
+        for chunk in &chunks {
+            // Get entities linked to this chunk
+            let mut params = BTreeMap::new();
+            params.insert("chunk_id".to_string(), DataValue::Str(chunk.id.clone().into()));
+
+            let result = self.run_query(
+                r#"?[entity_id, entity_name, entity_type] := 
+                    *chunk_entity{chunk_id: $chunk_id, entity_id},
+                    *entity{id: entity_id, name: entity_name, entity_type}"#,
+                params,
+            )?;
+
+            for row in &result.rows {
+                if row.len() >= 3 {
+                    let entity_id = dv_to_string(&row[0]);
+                    let entity_name = dv_to_string(&row[1]);
+                    let entity_type = dv_to_string(&row[2]);
+                    
+                    // Get related entities (1 hop)
+                    let related = self.get_related(&entity_name, 1)?;
+                    
+                    mentioned_entities.push((entity_name, entity_type, related));
+                }
+            }
+        }
+
+        // Limit entities to max_entities
+        mentioned_entities.truncate(max_entities);
+
+        // 3. Format the context
+        if !mentioned_entities.is_empty() {
+            context_parts.push("## Retrieved Knowledge".to_string());
+            
+            // Entities section
+            context_parts.push("\n**Entities:**".to_string());
+            for (name, entity_type, related) in &mentioned_entities {
+                let mut entity_line = format!("- **{}** ({})", name, entity_type);
+                if !related.is_empty() {
+                    let connections: Vec<String> = related.iter()
+                        .take(3) // Limit connections to avoid clutter
+                        .map(|r| format!("{} {} {}", r.direction, r.rel_type, r.entity.name))
+                        .collect();
+                    if !connections.is_empty() {
+                        entity_line.push_str(&format!(": {}", connections.join(", ")));
+                    }
+                }
+                context_parts.push(entity_line);
+            }
+        }
+
+        // 4. Add relevant chunks as notes
+        if !chunks.is_empty() {
+            context_parts.push("\n**Related notes:**".to_string());
+            for chunk in chunks.iter().take(3) { // Limit to avoid overwhelming prompt
+                context_parts.push(format!("> {}", chunk.content));
+            }
+        }
+
+        if context_parts.is_empty() {
+            Ok(String::new())
+        } else {
+            Ok(context_parts.join("\n"))
+        }
+    }
+
     /// Find chunks without embeddings and try to embed them.
     /// Returns (processed_count, success_count).
     pub fn backfill_embeddings(&self) -> Result<(usize, usize)> {
@@ -757,7 +909,7 @@ impl KnowledgeGraph {
     // Internal helpers
     // ────────────────────────────────────────────────────────────
 
-    fn run_query(
+    pub fn run_query(
         &self,
         script: &str,
         params: BTreeMap<String, DataValue>,
@@ -767,7 +919,7 @@ impl KnowledgeGraph {
             .map_err(|e| ImpError::Database(format!("Query failed: {}", e)))
     }
 
-    fn run_mutating(
+    pub fn run_mutating(
         &self,
         script: &str,
         params: BTreeMap<String, DataValue>,

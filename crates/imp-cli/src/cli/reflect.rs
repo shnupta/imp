@@ -3,6 +3,8 @@ use console::style;
 
 use crate::client::{ClaudeClient, Message};
 use crate::config::{imp_home, Config};
+use crate::extraction::{extract_knowledge_llm, process_extraction, ExtractionStats};
+use crate::knowledge::{KnowledgeGraph, read_queue, clear_queue};
 
 pub async fn run(date: Option<String>) -> Result<()> {
     let config = Config::load()?;
@@ -220,6 +222,26 @@ Rules:
         );
     }
 
+    // ══════════════════════════════════════════════════════════════════
+    // KNOWLEDGE GRAPH PROCESSING
+    // ══════════════════════════════════════════════════════════════════
+    
+    // Process knowledge queue if it exists
+    match process_knowledge_queue().await {
+        Ok(stats) => {
+            if stats.entities_added > 0 || stats.relationships_added > 0 || stats.chunks_stored > 0 {
+                println!(
+                    "{}",
+                    style(format!("  ✅ Knowledge graph updated ({} entities, {} relationships, {} chunks)", 
+                        stats.entities_added, stats.relationships_added, stats.chunks_stored)).green()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("⚠️ Knowledge graph processing failed: {}", e);
+        }
+    }
+
     // Token usage
     if let Some(ref usage) = response.usage {
         let total = usage.input_tokens + usage.output_tokens;
@@ -230,6 +252,65 @@ Rules:
     }
 
     Ok(())
+}
+
+/// Process the knowledge queue using LLM extraction.
+async fn process_knowledge_queue() -> Result<ExtractionStats> {
+    // Read pending queue entries
+    let queue_entries = read_queue()?;
+    
+    if queue_entries.is_empty() {
+        return Ok(ExtractionStats {
+            entities_added: 0,
+            relationships_added: 0,
+            chunks_stored: 0,
+            new_types_added: 0,
+        });
+    }
+
+    // Open knowledge graph
+    let kg = KnowledgeGraph::open()?;
+    
+    // Get current schema for LLM context
+    let schema = kg.get_schema()?;
+    
+    // Initialize client
+    let config = Config::load()?;
+    let client = ClaudeClient::new(config)?;
+    
+    let mut total_stats = ExtractionStats {
+        entities_added: 0,
+        relationships_added: 0,
+        chunks_stored: 0,
+        new_types_added: 0,
+    };
+
+    // Process each queue entry
+    for entry in &queue_entries {
+        match extract_knowledge_llm(&entry.content, &schema, &client).await {
+            Ok(extraction_result) => {
+                match process_extraction(&kg, &extraction_result) {
+                    Ok(stats) => {
+                        total_stats.entities_added += stats.entities_added;
+                        total_stats.relationships_added += stats.relationships_added;
+                        total_stats.chunks_stored += stats.chunks_stored;
+                        total_stats.new_types_added += stats.new_types_added;
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️ Failed to process extraction: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠️ Failed to extract knowledge from entry: {}", e);
+            }
+        }
+    }
+
+    // Clear processed entries
+    clear_queue()?;
+
+    Ok(total_stats)
 }
 
 /// Extract a JSON block from a response that might be wrapped in ```json fences.

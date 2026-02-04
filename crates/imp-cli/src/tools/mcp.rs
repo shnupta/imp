@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::{info, warn, debug};
 
 // ── MCP config types ─────────────────────────────────────────────────
 
@@ -539,10 +540,7 @@ impl McpRegistry {
     ) {
         for (name, config) in mcp_configs {
             if config.url.is_none() && config.command.is_none() {
-                eprintln!(
-                    "⚠ MCP '{}': needs either 'url' or 'command', skipping",
-                    name
-                );
+                warn!(server = %name, "MCP server needs either 'url' or 'command', skipping");
                 continue;
             }
 
@@ -553,7 +551,7 @@ impl McpRegistry {
                 let mut server = McpServer::new(name.clone(), config);
 
                 if let Err(e) = server.start().await {
-                    eprintln!("  ⚠ MCP '{}': initialize failed: {}", name, e);
+                    warn!(server = %name, error = %e, "MCP server initialize failed");
                     return None;
                 }
 
@@ -561,14 +559,14 @@ impl McpRegistry {
                     Ok(tools) => {
                         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
                         let tool_count = tools.len();
-                        eprintln!("  ✅ MCP '{}': {} tool(s) — {}", name, tool_count,
-                            if tool_names.len() <= 5 { tool_names.join(", ") }
-                            else { format!("{}, ... +{} more", tool_names[..4].join(", "), tool_names.len() - 4) }
+                        info!(server = %name, tool_count, tools = %if tool_names.len() <= 5 { tool_names.join(", ") }
+                            else { format!("{}, ... +{} more", tool_names[..4].join(", "), tool_names.len() - 4) },
+                            "MCP server ready"
                         );
                         Some(McpInitResult { name, server, tools })
                     }
                     Err(e) => {
-                        eprintln!("  ⚠ MCP '{}': list tools failed: {}", name, e);
+                        warn!(server = %name, error = %e, "MCP list tools failed");
                         None
                     }
                 }
@@ -595,7 +593,7 @@ impl McpRegistry {
         ).await {
             Ok(results) => results,
             Err(_) => {
-                eprintln!("⚠ MCP: timed out waiting for servers (30s)");
+                warn!("MCP: timed out waiting for servers (30s)");
                 return;
             }
         };

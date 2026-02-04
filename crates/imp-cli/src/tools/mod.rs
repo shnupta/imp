@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use tracing::{warn, debug};
 
 pub mod builtin;
 pub mod mcp;
@@ -87,7 +88,7 @@ impl ToolRegistry {
             let entries = match fs::read_dir(tools_dir) {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("⚠ Failed to read tools directory '{}': {}", tools_dir.display(), e);
+                    warn!(path = %tools_dir.display(), error = %e, "Failed to read tools directory");
                     return Ok(());
                 }
             };
@@ -95,7 +96,7 @@ impl ToolRegistry {
                 let entry = match entry {
                     Ok(e) => e,
                     Err(e) => {
-                        eprintln!("⚠ Failed to read tools directory entry: {}", e);
+                        warn!(error = %e, "Failed to read tools directory entry");
                         continue;
                     }
                 };
@@ -109,7 +110,7 @@ impl ToolRegistry {
                             self.tools.insert(tool_def.tool.name.clone(), tool_def);
                         }
                         Err(e) => {
-                            eprintln!("⚠ Failed to load tool '{}': {}", path.display(), e);
+                            warn!(path = %path.display(), error = %e, "Failed to load tool");
                         }
                     }
                 }
@@ -121,7 +122,7 @@ impl ToolRegistry {
             Ok(mcp_configs) if !mcp_configs.is_empty() => {
                 self.mcp_registry.load_from_config_background(&mcp_configs);
             }
-            Err(e) => eprintln!("⚠ Failed to read .mcp.json: {}", e),
+            Err(e) => warn!(error = %e, "Failed to read .mcp.json"),
             _ => {}
         }
 
@@ -172,7 +173,7 @@ impl ToolRegistry {
             Ok(mcp_configs) if !mcp_configs.is_empty() => {
                 self.mcp_registry.load_from_config_background(&mcp_configs);
             }
-            Err(e) => eprintln!("⚠ Failed to read .mcp.json: {}", e),
+            Err(e) => warn!(error = %e, "Failed to read .mcp.json"),
             _ => {}
         }
 

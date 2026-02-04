@@ -9,6 +9,7 @@ use crate::project::{self, ProjectInfo, ProjectRegistry};
 use crate::subagent::{SubAgent, SubAgentHandle, SubAgentResult};
 use crate::tools::ToolRegistry;
 use crate::usage::UsageTracker;
+use tracing::warn;
 use chrono::Local;
 use console::style;
 use rustyline::ExternalPrinter as RustylineExternalPrinter;
@@ -444,7 +445,7 @@ impl Agent {
             .open(&filepath)
             .and_then(|mut f| f.write_all(entry.as_bytes()))
         {
-            eprintln!("{}", style(format!("⚠ Memory write failed: {}", e)).dim());
+            warn!(error = %e, "Memory write failed");
         }
     }
 
@@ -676,7 +677,7 @@ impl Agent {
             .open(&filepath)
             .and_then(|mut f| f.write_all(entry.as_bytes()))
         {
-            eprintln!("{}", style(format!("⚠ Memory write failed: {}", e)).dim());
+            warn!(error = %e, "Memory write failed");
         }
     }
 }

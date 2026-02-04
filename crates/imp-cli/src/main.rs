@@ -16,6 +16,7 @@ mod context;
 mod db;
 mod error;
 mod highlight;
+mod logging;
 mod project;
 mod subagent;
 mod tools;
@@ -92,6 +93,7 @@ enum ProjectCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    logging::init();
     let cli = Cli::parse();
 
     match cli.command {

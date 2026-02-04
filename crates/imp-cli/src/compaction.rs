@@ -1,5 +1,6 @@
 use crate::client::Message;
 use serde_json::Value;
+use tracing::info;
 
 const CHARS_PER_TOKEN: usize = 4;
 const CONTEXT_LIMIT_TOKENS: usize = 200_000;
@@ -120,7 +121,7 @@ fn do_compact(messages: &[Message]) -> Vec<Message> {
 
     truncate_old_tool_results(&mut compacted, 4);
 
-    eprintln!("📦 Compacted {} old messages into summary (keeping {} recent)", old_messages.len(), KEEP_RECENT_MESSAGES);
+    info!(compacted = old_messages.len(), kept = KEEP_RECENT_MESSAGES, "Compacted conversation history");
 
     compacted
 }

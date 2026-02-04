@@ -128,13 +128,15 @@ pub struct McpTool {
 
 // ── MCP Server ───────────────────────────────────────────────────────
 
-/// A running MCP server connection (either SSE or stdio).
+/// A running MCP server connection (either HTTP/SSE or stdio).
 pub struct McpServer {
     name: String,
     config: McpServerConfig,
     /// Stdio: the running child process
     child: Option<tokio::process::Child>,
     next_id: AtomicU64,
+    /// Session ID returned by the server during initialize (Streamable HTTP).
+    session_id: Option<String>,
 }
 
 impl McpServer {
@@ -144,6 +146,7 @@ impl McpServer {
             config,
             child: None,
             next_id: AtomicU64::new(1),
+            session_id: None,
         }
     }
 
@@ -215,7 +218,7 @@ impl McpServer {
     /// Route a request to the appropriate transport.
     async fn send_request(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
         let response = if self.config.is_remote() {
-            self.sse_send(request).await?
+            self.http_send(request).await?
         } else {
             self.stdio_send(request).await?
         };
@@ -243,13 +246,13 @@ impl McpServer {
                 "clientInfo": { "name": "imp", "version": "0.1.0" }
             }),
         };
-        self.sse_send(&request).await?;
+        self.http_send(&request).await?;
         Ok(())
     }
 
-    async fn sse_send(&self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
+    async fn http_send(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
         let url = self.config.url.as_ref().ok_or_else(|| {
-            ImpError::Tool(format!("MCP '{}': missing url for SSE transport", self.name))
+            ImpError::Tool(format!("MCP '{}': missing url for HTTP transport", self.name))
         })?;
 
         let client = reqwest::Client::new();
@@ -258,6 +261,11 @@ impl McpServer {
         // Add headers with env var expansion
         for (key, value) in &self.config.headers {
             req_builder = req_builder.header(key, expand_env_var(value));
+        }
+
+        // Include session ID if we have one (Streamable HTTP transport)
+        if let Some(ref sid) = self.session_id {
+            req_builder = req_builder.header("Mcp-Session-Id", sid);
         }
 
         let body = serde_json::to_string(request)
@@ -278,6 +286,13 @@ impl McpServer {
                 "MCP '{}': HTTP {}: {}",
                 self.name, status, body
             )));
+        }
+
+        // Capture session ID from response headers
+        if let Some(sid) = resp.headers().get("mcp-session-id") {
+            if let Ok(sid_str) = sid.to_str() {
+                self.session_id = Some(sid_str.to_string());
+            }
         }
 
         // Parse response — try direct JSON first, then scan SSE lines

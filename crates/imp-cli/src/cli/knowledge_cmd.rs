@@ -3,6 +3,7 @@
 //! Provides `imp knowledge stats`, `imp knowledge schema`, and
 //! `imp knowledge query <name>` subcommands.
 
+use crate::embeddings::Embedder;
 use crate::error::Result;
 use crate::knowledge::KnowledgeGraph;
 use console::style;
@@ -12,12 +13,24 @@ pub fn stats() -> Result<()> {
     let kg = KnowledgeGraph::open()?;
     let s = kg.stats()?;
 
+    // Get embedding-specific stats
+    let with_embeddings = kg.count_rows("?[count(id)] := *memory_chunk{id, has_embedding}, has_embedding == true")?;
+    let without_embeddings = kg.count_rows("?[count(id)] := *memory_chunk{id, has_embedding}, has_embedding == false")?;
+
     println!("{}", style("Knowledge Graph Stats").bold().cyan());
     println!("  Entities:       {}", s.entity_count);
     println!("  Relationships:  {}", s.relationship_count);
-    println!("  Memory chunks:  {}", s.chunk_count);
+    println!("  Memory chunks:  {} ({} with embeddings, {} without)", 
+        s.chunk_count, with_embeddings, without_embeddings);
     println!("  Schema types:   {}", s.schema_type_count);
     println!("  Schema rels:    {}", s.schema_rel_count);
+    
+    // Show embedding status
+    if Embedder::available() {
+        println!("  Embeddings:     {}", style("✓ Available (BGE-large-en-v1.5)").green());
+    } else {
+        println!("  Embeddings:     {}", style("✗ Unavailable").red());
+    }
 
     Ok(())
 }
@@ -147,6 +160,86 @@ pub fn query(name: &str) -> Result<()> {
                 "{}",
                 style(format!("No entity found matching '{}'", name)).yellow()
             );
+        }
+    }
+
+    Ok(())
+}
+
+/// Search for memory chunks using semantic or text search.
+pub fn search(query: &str) -> Result<()> {
+    let kg = KnowledgeGraph::open()?;
+
+    // Warn if embeddings unavailable
+    if !Embedder::available() {
+        Embedder::warn_if_unavailable();
+        println!("Falling back to text search...\n");
+    }
+
+    let chunks = kg.search_similar(query, 10)?;
+
+    if chunks.is_empty() {
+        println!("{}", style(format!("No chunks found for query: '{}'", query)).yellow());
+        return Ok(());
+    }
+
+    println!("{}", style("Search Results").bold().cyan());
+    println!("Query: {}\n", style(query).yellow());
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        println!("{}. {} ({})", 
+            style(format!("{}", i + 1)).bold(),
+            style(&chunk.source_type).green(),
+            style(&chunk.source_id).dim()
+        );
+        
+        // Show content preview (first 200 chars)
+        let preview = if chunk.content.len() > 200 {
+            format!("{}...", &chunk.content[..200])
+        } else {
+            chunk.content.clone()
+        };
+        println!("   {}", style(preview).dim());
+
+        // Show metadata
+        println!("   {} • accessed {} times • embedding: {}", 
+            style(format!("created: {:.0}", chunk.created_at)).dim(),
+            style(chunk.access_count).cyan(),
+            if chunk.has_embedding { style("✓").green() } else { style("✗").red() }
+        );
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Backfill embeddings for chunks that don't have them.
+pub fn backfill_embeddings() -> Result<()> {
+    let kg = KnowledgeGraph::open()?;
+
+    if !Embedder::available() {
+        Embedder::warn_if_unavailable();
+        println!("{}", style("Cannot backfill embeddings: model unavailable").red());
+        return Ok(());
+    }
+
+    println!("{}", style("Backfilling embeddings...").cyan());
+
+    let (processed, success) = kg.backfill_embeddings()?;
+
+    if processed == 0 {
+        println!("{}", style("✓ No chunks need embedding backfill").green());
+    } else {
+        println!("{}", style(format!(
+            "✓ Processed {} chunks, successfully embedded {} chunks",
+            processed, success
+        )).green());
+
+        if success < processed {
+            println!("{}", style(format!(
+                "⚠️  {} chunks failed to embed",
+                processed - success
+            )).yellow());
         }
     }
 

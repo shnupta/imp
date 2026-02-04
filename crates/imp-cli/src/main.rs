@@ -14,6 +14,7 @@ mod compaction;
 mod config;
 mod context;
 mod db;
+mod embeddings;
 mod error;
 mod highlight;
 mod knowledge;
@@ -95,6 +96,13 @@ enum KnowledgeCommands {
         /// Entity name to look up
         name: String,
     },
+    /// Search for chunks using semantic or text search
+    Search {
+        /// Search query
+        query: String,
+    },
+    /// Backfill embeddings for chunks that don't have them
+    BackfillEmbeddings,
 }
 
 #[derive(Subcommand)]
@@ -153,6 +161,12 @@ async fn main() -> Result<()> {
             }
             KnowledgeCommands::Query { name } => {
                 knowledge_cmd::query(&name)?;
+            }
+            KnowledgeCommands::Search { query } => {
+                knowledge_cmd::search(&query)?;
+            }
+            KnowledgeCommands::BackfillEmbeddings => {
+                knowledge_cmd::backfill_embeddings()?;
             }
         },
         Commands::Project { command } => match command {

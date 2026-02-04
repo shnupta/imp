@@ -8,6 +8,7 @@
 //! conversations for later processing.
 
 use crate::config::imp_home;
+use crate::embeddings::Embedder;
 use crate::error::{ImpError, Result};
 use cozo::{DataValue, DbInstance, NamedRows, ScriptMutability};
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,18 @@ pub struct RelatedEntity {
     pub entity: Entity,
     pub rel_type: String,
     pub direction: String, // "->" or "<-"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryChunk {
+    pub id: String,
+    pub content: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub created_at: f64,
+    pub has_embedding: bool,
+    pub access_count: i64,
+    pub last_accessed: f64,
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -159,7 +172,11 @@ impl KnowledgeGraph {
                 content: String,
                 source_type: String,
                 source_id: String,
-                created_at: Float
+                created_at: Float,
+                embedding: <F32; 1024>,
+                has_embedding: Bool default false,
+                access_count: Int default 0,
+                last_accessed: Float default 0
             }"#,
             r#":create chunk_entity {
                 chunk_id: String,
@@ -188,10 +205,33 @@ impl KnowledgeGraph {
                 Ok(_) => {}
                 Err(e) => {
                     let msg = e.to_string();
-                    // Ignore "already exists" errors
-                    if msg.contains("already exists") {
+                    // Ignore "already exists" and "conflicts" errors from Phase 1
+                    if msg.contains("already exists") || msg.contains("conflicts") {
                         continue;
                     }
+                    return Err(e);
+                }
+            }
+        }
+
+        // Create HNSW vector index on memory_chunk embeddings.
+        // Ignore "already exists" just like the relations above.
+        match self.run_mutating(
+            r#"::hnsw create memory_chunk:embedding_index {
+                dim: 1024,
+                m: 16,
+                dtype: F32,
+                fields: [embedding],
+                distance: Cosine,
+                ef_construction: 200,
+                filter: has_embedding
+            }"#,
+            BTreeMap::new(),
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("already exists") && !msg.contains("conflicts") {
                     return Err(e);
                 }
             }
@@ -510,6 +550,210 @@ impl KnowledgeGraph {
     }
 
     // ────────────────────────────────────────────────────────────
+    // Memory chunk embedding methods
+    // ────────────────────────────────────────────────────────────
+
+    /// Store a memory chunk with optional embedding.
+    /// Returns the chunk ID.
+    pub fn store_chunk(&self, content: &str, source_type: &str, source_id: &str) -> Result<String> {
+        let chunk_id = uuid::Uuid::new_v4().to_string();
+        let now = now_f64();
+
+        // Try to get embedding
+        let (embedding_vec, has_embedding) = match Embedder::embed(content) {
+            Some(vec) => (vec, true),
+            None => (vec![0.0; 1024], false), // Placeholder vector
+        };
+
+        let mut params = BTreeMap::new();
+        params.insert("id".to_string(), DataValue::Str(chunk_id.clone().into()));
+        params.insert("content".to_string(), DataValue::Str(content.into()));
+        params.insert("source_type".to_string(), DataValue::Str(source_type.into()));
+        params.insert("source_id".to_string(), DataValue::Str(source_id.into()));
+        params.insert("created_at".to_string(), DataValue::from(now));
+        params.insert("embedding".to_string(), DataValue::List(
+            embedding_vec.into_iter().map(|f| DataValue::from(f as f64)).collect()
+        ));
+        params.insert("has_embedding".to_string(), DataValue::Bool(has_embedding));
+        params.insert("access_count".to_string(), DataValue::from(0i64));
+        params.insert("last_accessed".to_string(), DataValue::from(0.0));
+
+        self.run_mutating(
+            r#"?[id, content, source_type, source_id, created_at, embedding, has_embedding, access_count, last_accessed] <- [
+                [$id, $content, $source_type, $source_id, $created_at, $embedding, $has_embedding, $access_count, $last_accessed]
+            ]
+            :put memory_chunk { id => content, source_type, source_id, created_at, embedding, has_embedding, access_count, last_accessed }"#,
+            params,
+        )?;
+
+        Ok(chunk_id)
+    }
+
+    /// Search for similar chunks using vector similarity.
+    pub fn search_similar(&self, query_text: &str, k: usize) -> Result<Vec<MemoryChunk>> {
+        // Check if embeddings are available
+        if !Embedder::available() {
+            return self.search_chunks_by_text(query_text, k);
+        }
+
+        let query_embedding = match Embedder::embed(query_text) {
+            Some(vec) => vec,
+            None => return self.search_chunks_by_text(query_text, k),
+        };
+
+        let mut params = BTreeMap::new();
+        params.insert("query_vec".to_string(), DataValue::List(
+            query_embedding.into_iter().map(|f| DataValue::from(f as f64)).collect()
+        ));
+        params.insert("k".to_string(), DataValue::from(k as i64));
+
+        let result = self.run_query(
+            r#"?[id, content, source_type, source_id, created_at, has_embedding, access_count, last_accessed] := 
+                ~memory_chunk:embedding_index{
+                    id, content, source_type, source_id, created_at, has_embedding, access_count, last_accessed |
+                    query: $query_vec,
+                    k: $k,
+                    ef: 50
+                }"#,
+            params,
+        )?;
+
+        let mut chunks = Self::rows_to_chunks(&result);
+
+        // Update access counts
+        for chunk in &chunks {
+            self.increment_access_count(&chunk.id)?;
+        }
+
+        Ok(chunks)
+    }
+
+    /// Fallback text search using LIKE/contains.
+    pub fn search_chunks_by_text(&self, query: &str, k: usize) -> Result<Vec<MemoryChunk>> {
+        let mut params = BTreeMap::new();
+        params.insert("query".to_string(), DataValue::Str(format!("%{}%", query).into()));
+        params.insert("k".to_string(), DataValue::from(k as i64));
+
+        let result = self.run_query(
+            r#"?[id, content, source_type, source_id, created_at, has_embedding, access_count, last_accessed] := 
+                *memory_chunk{id, content, source_type, source_id, created_at, has_embedding, access_count, last_accessed},
+                content ~ $query
+                :limit $k"#,
+            params,
+        )?;
+
+        let chunks = Self::rows_to_chunks(&result);
+
+        // Update access counts
+        for chunk in &chunks {
+            self.increment_access_count(&chunk.id)?;
+        }
+
+        Ok(chunks)
+    }
+
+    /// Check if a similar chunk already exists (for deduplication).
+    pub fn has_similar_chunk(&self, content: &str, threshold: f32) -> Result<bool> {
+        if !Embedder::available() {
+            return Ok(false); // No way to check similarity without embeddings
+        }
+
+        let embedding = match Embedder::embed(content) {
+            Some(vec) => vec,
+            None => return Ok(false),
+        };
+
+        let mut params = BTreeMap::new();
+        params.insert("query_vec".to_string(), DataValue::List(
+            embedding.into_iter().map(|f| DataValue::from(f as f64)).collect()
+        ));
+
+        let result = self.run_query(
+            r#"?[similarity] := 
+                ~memory_chunk:embedding_index{
+                    similarity |
+                    query: $query_vec,
+                    k: 1,
+                    ef: 50
+                }"#,
+            params,
+        )?;
+
+        if let Some(row) = result.rows.first() {
+            if let Some(similarity) = row.first().and_then(|v| v.get_float()) {
+                return Ok((1.0 - similarity as f32) > threshold);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Increment access count for a chunk.
+    pub fn increment_access_count(&self, chunk_id: &str) -> Result<()> {
+        let mut params = BTreeMap::new();
+        params.insert("chunk_id".to_string(), DataValue::Str(chunk_id.into()));
+        params.insert("now".to_string(), DataValue::from(now_f64()));
+
+        self.run_mutating(
+            r#"?[id, new_count, last_accessed] := 
+                *memory_chunk{id, access_count},
+                id == $chunk_id,
+                new_count = access_count + 1,
+                last_accessed = $now
+            :update memory_chunk { id => access_count: new_count, last_accessed }"#,
+            params,
+        )?;
+
+        Ok(())
+    }
+
+    /// Find chunks without embeddings and try to embed them.
+    /// Returns (processed_count, success_count).
+    pub fn backfill_embeddings(&self) -> Result<(usize, usize)> {
+        // Get all chunks without embeddings
+        let result = self.run_query(
+            r#"?[id, content] := 
+                *memory_chunk{id, content, has_embedding},
+                has_embedding == false"#,
+            BTreeMap::new(),
+        )?;
+
+        let mut processed = 0;
+        let mut success = 0;
+
+        for row in &result.rows {
+            if row.len() >= 2 {
+                let chunk_id = dv_to_string(&row[0]);
+                let content = dv_to_string(&row[1]);
+
+                processed += 1;
+
+                if let Some(embedding) = Embedder::embed(&content) {
+                    // Update the chunk with embedding
+                    let mut params = BTreeMap::new();
+                    params.insert("chunk_id".to_string(), DataValue::Str(chunk_id.into()));
+                    params.insert("embedding".to_string(), DataValue::List(
+                        embedding.into_iter().map(|f| DataValue::from(f as f64)).collect()
+                    ));
+
+                    if let Ok(_) = self.run_mutating(
+                        r#"?[id, embedding, has_embedding] := 
+                            id == $chunk_id,
+                            embedding = $embedding,
+                            has_embedding = true
+                        :update memory_chunk { id => embedding, has_embedding }"#,
+                        params,
+                    ) {
+                        success += 1;
+                    }
+                }
+            }
+        }
+
+        Ok((processed, success))
+    }
+
+    // ────────────────────────────────────────────────────────────
     // Internal helpers
     // ────────────────────────────────────────────────────────────
 
@@ -533,7 +777,7 @@ impl KnowledgeGraph {
             .map_err(|e| ImpError::Database(format!("Mutation failed: {}", e)))
     }
 
-    fn count_rows(&self, query: &str) -> Result<usize> {
+    pub fn count_rows(&self, query: &str) -> Result<usize> {
         let result = self.run_query(query, BTreeMap::new())?;
         Ok(Self::extract_int(&result, 0, 0).unwrap_or(0) as usize)
     }
@@ -557,6 +801,25 @@ impl KnowledgeGraph {
             }
         }
         entities
+    }
+
+    fn rows_to_chunks(result: &NamedRows) -> Vec<MemoryChunk> {
+        let mut chunks = Vec::new();
+        for row in &result.rows {
+            if row.len() >= 8 {
+                chunks.push(MemoryChunk {
+                    id: dv_to_string(&row[0]),
+                    content: dv_to_string(&row[1]),
+                    source_type: dv_to_string(&row[2]),
+                    source_id: dv_to_string(&row[3]),
+                    created_at: dv_to_f64(&row[4]),
+                    has_embedding: dv_to_bool(&row[5]),
+                    access_count: dv_to_i64(&row[6]),
+                    last_accessed: dv_to_f64(&row[7]),
+                });
+            }
+        }
+        chunks
     }
 }
 
@@ -649,6 +912,17 @@ fn dv_to_string(dv: &DataValue) -> String {
 
 fn dv_to_f64(dv: &DataValue) -> f64 {
     dv.get_float().unwrap_or(0.0)
+}
+
+fn dv_to_i64(dv: &DataValue) -> i64 {
+    dv.get_int().unwrap_or(0)
+}
+
+fn dv_to_bool(dv: &DataValue) -> bool {
+    match dv {
+        DataValue::Bool(b) => *b,
+        _ => false,
+    }
 }
 
 fn dv_to_json(dv: &DataValue) -> JsonValue {

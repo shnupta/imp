@@ -85,13 +85,34 @@ impl ToolRegistry {
 
         // Load custom tools from TOML files if directory exists
         if tools_dir.exists() {
-            for entry in fs::read_dir(tools_dir)? {
-                let entry = entry?;
+            let entries = match fs::read_dir(tools_dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("⚠ Failed to read tools directory '{}': {}", tools_dir.display(), e);
+                    return Ok(());
+                }
+            };
+            for entry in entries {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("⚠ Failed to read tools directory entry: {}", e);
+                        continue;
+                    }
+                };
                 let path = entry.path();
                 if path.is_file() && path.extension().map_or(false, |ext| ext == "toml") {
-                    let content = fs::read_to_string(&path)?;
-                    let tool_def: ToolDefinition = toml::from_str(&content)?;
-                    self.tools.insert(tool_def.tool.name.clone(), tool_def);
+                    match fs::read_to_string(&path).and_then(|content| {
+                        toml::from_str::<ToolDefinition>(&content)
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                    }) {
+                        Ok(tool_def) => {
+                            self.tools.insert(tool_def.tool.name.clone(), tool_def);
+                        }
+                        Err(e) => {
+                            eprintln!("⚠ Failed to load tool '{}': {}", path.display(), e);
+                        }
+                    }
                 }
             }
         }

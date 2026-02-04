@@ -499,7 +499,7 @@ pub fn process_extraction(
 pub async fn extract_knowledge_llm(
     content: &str, 
     schema: &SchemaInfo,
-    client: &crate::client::ClaudeClient
+    client: &mut crate::client::ClaudeClient
 ) -> Result<ExtractionResult> {
     let prompt = build_extraction_prompt(content, schema);
     

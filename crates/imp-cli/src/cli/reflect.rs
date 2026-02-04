@@ -8,7 +8,7 @@ use crate::knowledge::{KnowledgeGraph, read_queue, clear_queue};
 
 pub async fn run(date: Option<String>) -> Result<()> {
     let config = Config::load()?;
-    let mut client = ClaudeClient::new(config)?;
+    let mut client = ClaudeClient::new(config.clone())?;
     let home = imp_home()?;
 
     // Determine which daily file to reflect on
@@ -242,6 +242,59 @@ Rules:
         }
     }
 
+    // ══════════════════════════════════════════════════════════════════
+    // PHASE 5: EMBED DAILY NOTES
+    // ══════════════════════════════════════════════════════════════════
+
+    if config.knowledge.enabled {
+        match KnowledgeGraph::open() {
+            Ok(kg) => {
+                // 1. Chunk and embed daily notes
+                let chunks = chunk_text(&daily_content, 400);
+                let mut chunks_stored = 0;
+
+                for chunk_txt in &chunks {
+                    if chunk_txt.trim().len() < 50 {
+                        continue; // Skip tiny fragments
+                    }
+
+                    // Check for duplicates before storing
+                    if let Ok(false) = kg.has_similar_chunk(chunk_txt, 0.9) {
+                        if let Ok(chunk_id) = kg.store_chunk(chunk_txt, "daily_note", &target_date) {
+                            // Link chunk to any mentioned entities
+                            link_chunk_to_entities(&kg, &chunk_id, chunk_txt);
+                            chunks_stored += 1;
+                        }
+                    }
+                }
+
+                if chunks_stored > 0 {
+                    println!("{}", style(format!("  ✅ Embedded {} daily note chunks", chunks_stored)).green());
+                }
+
+                // 2. Backfill any chunks missing embeddings
+                match kg.backfill_embeddings() {
+                    Ok((processed, success)) if processed > 0 => {
+                        println!("{}", style(format!("  ✅ Backfilled {}/{} embeddings", success, processed)).green());
+                    }
+                    _ => {}
+                }
+
+                // 3. Print stats
+                if let Ok(stats) = kg.stats() {
+                    println!("\n{}", style("📊 Knowledge Graph").bold());
+                    println!("  Entities: {}, Relationships: {}, Chunks: {}",
+                        stats.entity_count, stats.relationship_count, stats.chunk_count);
+                    println!("  Schema: {} types, {} relationship types",
+                        stats.schema_type_count, stats.schema_rel_count);
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠️ Could not open knowledge graph for daily embedding: {}", e);
+            }
+        }
+    }
+
     // Token usage
     if let Some(ref usage) = response.usage {
         let total = usage.input_tokens + usage.output_tokens;
@@ -276,7 +329,7 @@ async fn process_knowledge_queue() -> Result<ExtractionStats> {
     
     // Initialize client
     let config = Config::load()?;
-    let client = ClaudeClient::new(config)?;
+    let mut client = ClaudeClient::new(config)?;
     
     let mut total_stats = ExtractionStats {
         entities_added: 0,
@@ -287,7 +340,7 @@ async fn process_knowledge_queue() -> Result<ExtractionStats> {
 
     // Process each queue entry
     for entry in &queue_entries {
-        match extract_knowledge_llm(&entry.content, &schema, &client).await {
+        match extract_knowledge_llm(&entry.content, &schema, &mut client).await {
             Ok(extraction_result) => {
                 match process_extraction(&kg, &extraction_result) {
                     Ok(stats) => {
@@ -311,6 +364,72 @@ async fn process_knowledge_queue() -> Result<ExtractionStats> {
     clear_queue()?;
 
     Ok(total_stats)
+}
+
+/// Split text into chunks at paragraph boundaries, targeting ~max_chars per chunk.
+fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for paragraph in text.split("\n\n") {
+        let trimmed = paragraph.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if current.len() + trimmed.len() + 2 > max_chars && !current.is_empty() {
+            chunks.push(current.clone());
+            current.clear();
+        }
+
+        if !current.is_empty() {
+            current.push_str("\n\n");
+        }
+        current.push_str(trimmed);
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
+}
+
+/// Link a chunk to any entities whose names appear in the chunk text.
+fn link_chunk_to_entities(kg: &KnowledgeGraph, chunk_id: &str, text: &str) {
+    let chunk_lower = text.to_lowercase();
+
+    // Get all entities
+    let params = std::collections::BTreeMap::new();
+    if let Ok(result) = kg.run_query(
+        "?[id, name] := *entity{id, name}",
+        params,
+    ) {
+        for row in &result.rows {
+            if row.len() >= 2 {
+                let entity_id = match &row[0] {
+                    cozo::DataValue::Str(s) => s.to_string(),
+                    _ => continue,
+                };
+                let entity_name = match &row[1] {
+                    cozo::DataValue::Str(s) => s.to_string(),
+                    _ => continue,
+                };
+
+                if chunk_lower.contains(&entity_name.to_lowercase()) {
+                    let mut params = std::collections::BTreeMap::new();
+                    params.insert("chunk_id".to_string(), cozo::DataValue::Str(chunk_id.into()));
+                    params.insert("entity_id".to_string(), cozo::DataValue::Str(entity_id.into()));
+
+                    let _ = kg.run_mutating(
+                        r#"?[chunk_id, entity_id] <- [[$chunk_id, $entity_id]]
+                        :put chunk_entity { chunk_id, entity_id }"#,
+                        params,
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Extract a JSON block from a response that might be wrapped in ```json fences.

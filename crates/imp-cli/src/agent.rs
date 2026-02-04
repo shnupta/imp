@@ -99,13 +99,22 @@ impl Agent {
         let mut usage = UsageTracker::new();
         usage.set_model(&config.llm.model);
 
+        // Disable embeddings if configured
+        if !config.knowledge.embeddings_enabled {
+            crate::embeddings::Embedder::disable();
+        }
+
         // Open knowledge graph (optional - wrapped so it doesn't fail if DB issues)
-        let knowledge = match crate::knowledge::KnowledgeGraph::open() {
-            Ok(kg) => Some(kg),
-            Err(e) => {
-                eprintln!("⚠ Knowledge graph unavailable: {}", e);
-                None
+        let knowledge = if config.knowledge.enabled {
+            match crate::knowledge::KnowledgeGraph::open() {
+                Ok(kg) => Some(kg),
+                Err(e) => {
+                    eprintln!("⚠ Knowledge graph unavailable: {}", e);
+                    None
+                }
             }
+        } else {
+            None
         };
 
         Ok(Self {
@@ -430,21 +439,13 @@ impl Agent {
     }
 
     /// Distill structured insights from a conversation turn into the daily memory file.
-    /// Also processes the knowledge queue for entity/relationship extraction.
     /// Only writes if the turn was substantive (had tool calls or a long response).
+    /// NOTE: Knowledge extraction happens in `imp reflect`, NOT here.
+    /// The agent flags content via the `queue_knowledge` tool during conversation;
+    /// reflect processes the queue later with full LLM extraction.
     fn maybe_distill_insights(&mut self, user_message: &str, response_text: &str, tool_count: usize) {
         if tool_count > 0 {
             self.total_tool_calls += tool_count;
-        }
-
-        // Knowledge extraction (Option B - process the knowledge queue)
-        if crate::extraction::should_extract(user_message, response_text, tool_count) {
-            if let Some(ref kg) = self.knowledge {
-                match self.extract_and_store() {
-                    Ok(_) => { /* success - could optionally log stats */ },
-                    Err(e) => eprintln!("⚠ Knowledge extraction failed: {}", e),
-                }
-            }
         }
 
         if !AUTO_INSIGHTS {
@@ -482,88 +483,6 @@ impl Agent {
         {
             warn!(error = %e, "Memory write failed");
         }
-    }
-
-    /// Extract and store knowledge from the knowledge queue.
-    /// This processes pending queue entries created by the queue_knowledge tool.
-    fn extract_and_store(&self) -> Result<crate::extraction::ExtractionStats> {
-        let kg = self.knowledge.as_ref().ok_or_else(|| {
-            ImpError::Agent("Knowledge graph not available".to_string())
-        })?;
-
-        // Read pending queue entries
-        let queue_entries = crate::knowledge::read_queue()?;
-        if queue_entries.is_empty() {
-            return Ok(crate::extraction::ExtractionStats {
-                entities_added: 0,
-                relationships_added: 0,
-                chunks_stored: 0,
-                new_types_added: 0,
-            });
-        }
-
-        // Get current schema
-        let schema = kg.get_schema()?;
-
-        // Process the queue using lightweight extraction
-        let extraction = crate::extraction::process_knowledge_queue(queue_entries, &schema)?;
-
-        let mut stats = crate::extraction::ExtractionStats {
-            entities_added: 0,
-            relationships_added: 0,
-            chunks_stored: 0,
-            new_types_added: 0,
-        };
-
-        // Store entities (check for duplicates)
-        for extracted_entity in extraction.entities {
-            match kg.find_entity_by_name(&extracted_entity.name)? {
-                Some(_existing) => {
-                    // Entity already exists - could merge properties here if needed
-                }
-                None => {
-                    // New entity - store it
-                    let entity: crate::knowledge::Entity = extracted_entity.into();
-                    kg.store_entity(entity)?;
-                    stats.entities_added += 1;
-                }
-            }
-        }
-
-        // Store relationships (resolve entity names to IDs)
-        for extracted_rel in extraction.relationships {
-            // Find the from/to entities
-            let from_entity = kg.find_entity_by_name(&extracted_rel.from_name)?;
-            let to_entity = kg.find_entity_by_name(&extracted_rel.to_name)?;
-
-            if let (Some(from), Some(to)) = (from_entity, to_entity) {
-                let mut rel: crate::knowledge::Relationship = extracted_rel.into();
-                rel.from_id = from.id;
-                rel.to_id = to.id;
-                kg.store_relationship(rel)?;
-                stats.relationships_added += 1;
-            }
-        }
-
-        // Store chunks with embeddings
-        for extracted_chunk in extraction.chunks {
-            let chunk_id = kg.store_chunk(&extracted_chunk.content, "conversation", &self.session_id)?;
-            
-            // Link chunk to mentioned entities
-            for entity_name in &extracted_chunk.mentions {
-                if let Some(entity) = kg.find_entity_by_name(entity_name)? {
-                    // Store chunk_entity relationship (would need to add this to knowledge.rs)
-                    // For now, skip this linkage - the chunks are still searchable
-                }
-            }
-            
-            stats.chunks_stored += 1;
-        }
-
-        // Clear the queue after successful processing
-        crate::knowledge::clear_queue()?;
-
-        Ok(stats)
     }
 
     // ── Sub-agent management ─────────────────────────────────────────

@@ -4,6 +4,9 @@
 //! Downloads the ONNX model on first use (~335MB, cached at `~/.cache/fastembed/`).
 //! Gracefully degrades if the model can't be loaded — returns `None` and logs a
 //! warning once so the rest of the knowledge graph still works.
+//!
+//! Can be disabled entirely via `[knowledge] embeddings_enabled = false` in
+//! config.toml to avoid the model download (e.g. behind a firewall).
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,13 +18,25 @@ static EMBEDDING_MODEL: OnceLock<Option<TextEmbedding>> = OnceLock::new();
 /// Only warn about unavailability once per process.
 static EMBEDDINGS_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// Set to true to globally disable embedding attempts (via config).
+static EMBEDDINGS_DISABLED: AtomicBool = AtomicBool::new(false);
+
 pub struct Embedder;
 
 impl Embedder {
+    /// Globally disable embeddings for this process.
+    /// Called at startup when `[knowledge] embeddings_enabled = false`.
+    pub fn disable() {
+        EMBEDDINGS_DISABLED.store(true, Ordering::Relaxed);
+    }
+
     /// Get or lazily initialise the embedding model.
-    /// Returns `None` if the model couldn't be loaded (download failure, ONNX
-    /// issues, disk full, etc.).
+    /// Returns `None` if disabled via config, or if the model couldn't be
+    /// loaded (download failure, ONNX issues, disk full, etc.).
     fn try_model() -> Option<&'static TextEmbedding> {
+        if EMBEDDINGS_DISABLED.load(Ordering::Relaxed) {
+            return None;
+        }
         EMBEDDING_MODEL
             .get_or_init(|| {
                 let mut opts = InitOptions::default();
@@ -33,6 +48,8 @@ impl Embedder {
                         eprintln!("⚠️  Failed to load embedding model: {e}");
                         eprintln!("   Knowledge graph will work without semantic search.");
                         eprintln!("   Entity lookup and graph traversal still available.");
+                        eprintln!("   To disable this warning, set embeddings_enabled = false");
+                        eprintln!("   in [knowledge] section of ~/.imp/config.toml");
                         None
                     }
                 }
@@ -41,7 +58,7 @@ impl Embedder {
     }
 
     /// Embed a single piece of text. Returns `None` when the model is
-    /// unavailable.
+    /// unavailable or disabled.
     pub fn embed(text: &str) -> Option<Vec<f32>> {
         let model = Self::try_model()?;
         model
@@ -51,7 +68,7 @@ impl Embedder {
     }
 
     /// Embed multiple texts in one batch (more efficient than repeated single
-    /// calls). Returns `None` when the model is unavailable.
+    /// calls). Returns `None` when the model is unavailable or disabled.
     pub fn embed_batch(texts: Vec<&str>) -> Option<Vec<Vec<f32>>> {
         let model = Self::try_model()?;
         model.embed(texts, None).ok()
@@ -65,7 +82,11 @@ impl Embedder {
     /// Print a one-time warning if embeddings aren't available.
     pub fn warn_if_unavailable() {
         if !Self::available() && !EMBEDDINGS_WARNED.swap(true, Ordering::Relaxed) {
-            eprintln!("⚠️  Semantic search disabled (embedding model unavailable)");
+            if EMBEDDINGS_DISABLED.load(Ordering::Relaxed) {
+                eprintln!("ℹ  Embeddings disabled via config — using text search fallback");
+            } else {
+                eprintln!("⚠️  Semantic search disabled (embedding model unavailable)");
+            }
         }
     }
 }

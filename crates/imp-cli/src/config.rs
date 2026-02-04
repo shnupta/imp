@@ -12,6 +12,35 @@ pub struct Config {
     pub thinking: ThinkingConfig,
     #[serde(default)]
     pub display: DisplayConfig,
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
+}
+
+/// Configuration for the knowledge graph and embeddings.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct KnowledgeConfig {
+    /// Enable/disable the knowledge graph entirely. Default: true
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Enable/disable embeddings (model download + semantic search).
+    /// Set to false if behind a firewall or to avoid the ~335MB model download.
+    /// Graph storage, entity lookup, and text search still work without embeddings.
+    /// Default: true
+    #[serde(default = "default_true")]
+    pub embeddings_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            embeddings_enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

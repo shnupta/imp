@@ -30,15 +30,16 @@ impl Embedder {
         EMBEDDINGS_DISABLED.store(true, Ordering::Relaxed);
     }
 
-    /// Get or lazily initialise the embedding model.
-    /// Returns `None` if disabled via config, or if the model couldn't be
-    /// loaded (download failure, ONNX issues, disk full, etc.).
-    fn try_model() -> Option<&'static TextEmbedding> {
+    /// Begin loading the embedding model in a background thread.
+    /// Call once at startup. The model becomes available when loading completes;
+    /// until then, `embed()` / `available()` gracefully return `None` / `false`
+    /// so the first chat message is never blocked by model init.
+    pub fn init_background() {
         if EMBEDDINGS_DISABLED.load(Ordering::Relaxed) {
-            return None;
+            return;
         }
-        EMBEDDING_MODEL
-            .get_or_init(|| {
+        std::thread::spawn(|| {
+            let _ = EMBEDDING_MODEL.get_or_init(|| {
                 let mut opts = InitOptions::default();
                 opts.model_name = EmbeddingModel::BGELargeENV15;
                 opts.show_download_progress = true;
@@ -53,8 +54,19 @@ impl Embedder {
                         None
                     }
                 }
-            })
-            .as_ref()
+            });
+        });
+    }
+
+    /// Non-blocking check for the embedding model.
+    /// Returns `None` if disabled, not yet loaded (background init in progress),
+    /// or if loading failed.
+    fn try_model() -> Option<&'static TextEmbedding> {
+        if EMBEDDINGS_DISABLED.load(Ordering::Relaxed) {
+            return None;
+        }
+        // Non-blocking: returns None while background init is still running
+        EMBEDDING_MODEL.get()?.as_ref()
     }
 
     /// Embed a single piece of text. Returns `None` when the model is

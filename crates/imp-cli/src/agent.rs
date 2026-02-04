@@ -18,7 +18,7 @@ use std::fs;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 // termimad used via highlight module
 
 /// Shared handle to a rustyline ExternalPrinter for output that doesn't garble
@@ -49,7 +49,9 @@ pub struct Agent {
     /// External printer for readline-safe output.
     printer: Option<SharedPrinter>,
     /// Knowledge graph for entity/relationship storage and retrieval.
-    knowledge: Option<crate::knowledge::KnowledgeGraph>,
+    /// Wrapped in Arc<OnceLock> so it can be initialized in a background thread
+    /// without blocking the first chat message.
+    knowledge: Arc<OnceLock<crate::knowledge::KnowledgeGraph>>,
 }
 
 impl Agent {
@@ -99,23 +101,25 @@ impl Agent {
         let mut usage = UsageTracker::new();
         usage.set_model(&config.llm.model);
 
-        // Disable embeddings if configured
+        // Disable embeddings if configured, otherwise start loading in background
         if !config.knowledge.embeddings_enabled {
             crate::embeddings::Embedder::disable();
+        } else if config.knowledge.enabled {
+            crate::embeddings::Embedder::init_background();
         }
 
-        // Open knowledge graph (optional - wrapped so it doesn't fail if DB issues)
-        let knowledge = if config.knowledge.enabled {
-            match crate::knowledge::KnowledgeGraph::open() {
-                Ok(kg) => Some(kg),
-                Err(e) => {
-                    eprintln!("⚠ Knowledge graph unavailable: {}", e);
-                    None
+        // Open knowledge graph in background thread so it doesn't block first message.
+        // CozoDB + RocksDB open + schema check can take a moment on cold start.
+        let knowledge = Arc::new(OnceLock::new());
+        if config.knowledge.enabled {
+            let kg_cell = knowledge.clone();
+            std::thread::spawn(move || {
+                match crate::knowledge::KnowledgeGraph::open() {
+                    Ok(kg) => { let _ = kg_cell.set(kg); }
+                    Err(e) => eprintln!("⚠ Knowledge graph unavailable: {e}"),
                 }
-            }
-        } else {
-            None
-        };
+            });
+        }
 
         Ok(Self {
             client,
@@ -206,7 +210,8 @@ impl Agent {
             let mut system_prompt = self.context.assemble_system_prompt();
             
             // Retrieve and append relevant knowledge from knowledge graph
-            if let Some(ref kg) = self.knowledge {
+            // (non-blocking — skipped if background init hasn't finished yet)
+            if let Some(kg) = self.knowledge.get() {
                 if let Ok(context) = kg.retrieve_context(&effective_message, 5, 5) {
                     if !context.is_empty() {
                         system_prompt.push_str("\n\n---\n\n");

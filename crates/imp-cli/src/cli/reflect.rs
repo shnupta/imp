@@ -626,25 +626,20 @@ fn link_chunk_to_entities(kg: &KnowledgeGraph, chunk_id: &str, text: &str) {
     }
 }
 
-/// Extract a JSON block from a response that might be wrapped in ```json fences.
+/// Extract a JSON object from a response that might be wrapped in ```json fences.
+/// Uses brace matching rather than fence detection, since JSON values can contain
+/// markdown backticks (e.g. file content updates with code blocks).
 fn extract_json_block(text: &str) -> &str {
     let trimmed = text.trim();
-    if let Some(start) = trimmed.find("```json") {
-        let json_start = start + 7;
-        if let Some(end) = trimmed[json_start..].find("```") {
-            return trimmed[json_start..json_start + end].trim();
-        }
-    }
-    if let Some(start) = trimmed.find("```") {
-        let json_start = start + 3;
-        if let Some(end) = trimmed[json_start..].find("```") {
-            return trimmed[json_start..json_start + end].trim();
-        }
-    }
+
+    // Find the first { and last } — reliable for JSON objects regardless of fencing.
     if let Some(start) = trimmed.find('{') {
         if let Some(end) = trimmed.rfind('}') {
-            return &trimmed[start..=end];
+            if end > start {
+                return &trimmed[start..=end];
+            }
         }
     }
+
     trimmed
 }

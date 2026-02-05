@@ -89,8 +89,9 @@ pub async fn run(date: Option<String>) -> Result<()> {
         );
 
         let messages = vec![Message::text("user", &summary_prompt)];
+        // Disable thinking for structured extraction — gives full token budget to output
         let response = client
-            .send_message_with_options(messages, None, None, false, Some(16_384))
+            .send_message_inner(messages, None, None, false, Some(16_384), Some(false))
             .await?;
         let daily_summary = client.extract_text_content(&response);
 
@@ -98,8 +99,9 @@ pub async fn run(date: Option<String>) -> Result<()> {
             println!(
                 "{}",
                 style(format!(
-                    "  daily file tokens: {} in / {} out",
-                    usage.input_tokens, usage.output_tokens
+                    "  daily file: {} in / {} out | stop: {}",
+                    usage.input_tokens, usage.output_tokens,
+                    response.stop_reason.as_deref().unwrap_or("?")
                 ))
                 .dim()
             );
@@ -225,10 +227,9 @@ Rules:
     println!("{}", style("🔍 Reflecting on files and extracting knowledge...").dim());
 
     let messages = vec![Message::text("user", &user_message)];
-    // Use generous output budget — reflection JSON includes full file contents + knowledge entries.
-    // Needs to be high because thinking tokens (if enabled) eat into this budget too.
+    // Disable thinking for structured extraction — gives full token budget to output.
     let response = client
-        .send_message_with_options(messages, Some(system_prompt), None, false, Some(64_000))
+        .send_message_inner(messages, Some(system_prompt), None, false, Some(16_384), Some(false))
         .await?;
     let raw_response = client.extract_text_content(&response);
 
@@ -236,10 +237,19 @@ Rules:
         println!(
             "{}",
             style(format!(
-                "  reflect tokens: {} in / {} out",
-                usage.input_tokens, usage.output_tokens
+                "  reflect: {} in / {} out | stop: {}",
+                usage.input_tokens, usage.output_tokens,
+                response.stop_reason.as_deref().unwrap_or("?")
             ))
             .dim()
+        );
+    }
+
+    // Warn if response was truncated
+    if response.stop_reason.as_deref() == Some("max_tokens") {
+        eprintln!(
+            "{}",
+            style("⚠️  Response was truncated (hit max_tokens). Output may be incomplete.").yellow()
         );
     }
 

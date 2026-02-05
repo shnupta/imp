@@ -93,7 +93,7 @@ pub struct AnthropicResponse {
     #[serde(rename = "type")]
     message_type: String,
     content: Vec<ContentBlock>,
-    stop_reason: Option<String>,
+    pub stop_reason: Option<String>,
     pub usage: Option<Usage>,
 }
 
@@ -238,14 +238,29 @@ impl ClaudeClient {
         stream: bool,
         max_tokens_override: Option<u32>,
     ) -> Result<AnthropicResponse> {
+        self.send_message_inner(messages, system_prompt, tools, stream, max_tokens_override, None).await
+    }
+
+    /// Full-control message send with all overrides.
+    /// `thinking_override`: Some(true) = force on, Some(false) = force off, None = use config.
+    pub async fn send_message_inner(
+        &mut self,
+        messages: Vec<Message>,
+        system_prompt: Option<String>,
+        tools: Option<Value>,
+        stream: bool,
+        max_tokens_override: Option<u32>,
+        thinking_override: Option<bool>,
+    ) -> Result<AnthropicResponse> {
         // Ensure we have a valid token (refresh if necessary)
         self.ensure_valid_token().await?;
 
         let headers = self.prepare_auth_headers()?;
 
+        let use_thinking = thinking_override.unwrap_or(self.config.thinking.enabled);
         let base_max = max_tokens_override.unwrap_or(self.config.llm.max_tokens);
         // When thinking is enabled, max_tokens must exceed budget_tokens
-        let max_tokens = if self.config.thinking.enabled {
+        let max_tokens = if use_thinking {
             let min_required = self.config.thinking.budget_tokens + 4096;
             std::cmp::max(base_max, min_required)
         } else {
@@ -259,7 +274,7 @@ impl ClaudeClient {
         });
 
         // Add thinking configuration
-        if self.config.thinking.enabled {
+        if use_thinking {
             request_body["thinking"] = json!({
                 "type": "enabled",
                 "budget_tokens": self.config.thinking.budget_tokens

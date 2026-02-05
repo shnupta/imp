@@ -237,8 +237,10 @@ impl KnowledgeGraph {
             }
         }
 
-        // Seed initial schema if empty
-        self.seed_schema()?;
+        // Seed initial schema if empty (non-fatal — these are just defaults)
+        if let Err(e) = self.seed_schema() {
+            tracing::warn!(error = %e, "Failed to seed default schema (non-fatal)");
+        }
 
         Ok(())
     }
@@ -252,32 +254,59 @@ impl KnowledgeGraph {
             return Ok(()); // Already seeded
         }
 
-        // Seed entity types
-        self.run_mutating(
-            r#"?[type_name, description, example_names, created_at] <- [
-                ["person", "A human (team member, collaborator)", ["Casey", "Victor"], 0.0],
-                ["project", "A code repository or major system", ["eu-exeqts-delta1", "global-prism", "imp"], 0.0],
-                ["protocol", "A communication/exchange protocol", ["OUCH", "BOE", "FIX", "Pillar"], 0.0],
-                ["exchange", "A stock/trading exchange", ["NASDAQ", "NYSE", "BATS"], 0.0],
-                ["concept", "An abstract idea, pattern, or topic", ["instrument lifecycle", "retry logic"], 0.0],
-                ["tool", "A software tool or technology", ["Rust", "Neo4j", "Cozo"], 0.0]
-            ]
-            :put schema_type { type_name, description, example_names, created_at }"#,
-            BTreeMap::new(),
-        )?;
+        // Seed entity types one at a time to avoid CozoDB inline array parsing issues
+        // with Json-typed columns
+        let entity_types = vec![
+            ("person", "A human (team member, collaborator)"),
+            ("project", "A code repository or major system"),
+            ("protocol", "A communication/exchange protocol"),
+            ("exchange", "A stock/trading exchange"),
+            ("concept", "An abstract idea, pattern, or topic"),
+            ("tool", "A software tool or technology"),
+        ];
+
+        for (type_name, description) in &entity_types {
+            let mut params = BTreeMap::new();
+            params.insert("type_name".to_string(), DataValue::Str((*type_name).into()));
+            params.insert("description".to_string(), DataValue::Str((*description).into()));
+            params.insert("example_names".to_string(), DataValue::List(vec![]));
+            params.insert("created_at".to_string(), DataValue::from(0.0));
+
+            self.run_mutating(
+                r#"?[type_name, description, example_names, created_at] <- [
+                    [$type_name, $description, $example_names, $created_at]
+                ]
+                :put schema_type { type_name => description, example_names, created_at }"#,
+                params,
+            )?;
+        }
 
         // Seed relationship types
-        self.run_mutating(
-            r#"?[rel_name, description, from_types, to_types, example_usage, created_at] <- [
-                ["works_on", "Person actively works on a project", ["person"], ["project"], "Casey works_on eu-exeqts-delta1", 0.0],
-                ["uses", "Project/system uses a protocol or tool", ["project"], ["protocol", "tool"], "eu-exeqts-delta1 uses OUCH", 0.0],
-                ["authored", "Person created something", ["person"], ["pr", "feature"], "Victor authored PR #4161", 0.0],
-                ["related_to", "General relationship between concepts", ["concept", "project", "tool"], ["concept", "project", "tool"], "instrument lifecycle related_to exeqts", 0.0],
-                ["part_of", "Component belongs to larger system", ["feature", "protocol"], ["project", "system"], "TAQ OIL part_of global-prism", 0.0]
-            ]
-            :put schema_rel { rel_name, description, from_types, to_types, example_usage, created_at }"#,
-            BTreeMap::new(),
-        )?;
+        let rel_types = vec![
+            ("works_on", "Person actively works on a project", "Casey works_on project-x"),
+            ("uses", "Project/system uses a protocol or tool", "project-x uses OUCH"),
+            ("authored", "Person created something", "Victor authored PR #4161"),
+            ("related_to", "General relationship between concepts", "instrument lifecycle related_to exeqts"),
+            ("part_of", "Component belongs to larger system", "TAQ OIL part_of global-prism"),
+        ];
+
+        for (rel_name, description, example_usage) in &rel_types {
+            let mut params = BTreeMap::new();
+            params.insert("rel_name".to_string(), DataValue::Str((*rel_name).into()));
+            params.insert("description".to_string(), DataValue::Str((*description).into()));
+            params.insert("from_types".to_string(), DataValue::List(vec![]));
+            params.insert("to_types".to_string(), DataValue::List(vec![]));
+            params.insert("example_usage".to_string(), DataValue::Str((*example_usage).into()));
+            params.insert("created_at".to_string(), DataValue::from(0.0));
+
+            self.run_mutating(
+                r#"?[rel_name, description, from_types, to_types, example_usage, created_at] <- [
+                    [$rel_name, $description, $from_types, $to_types, $example_usage, $created_at]
+                ]
+                :put schema_rel { rel_name => description, from_types, to_types, example_usage, created_at }"#,
+                params,
+            )?;
+        }
 
         Ok(())
     }

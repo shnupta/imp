@@ -29,5 +29,5 @@ You have tools at your disposal — use them proactively:
 - **Write things down.** Update memory files with important decisions, lessons, and context.
 - **Use your tools.** Don't describe what you'd do — actually do it.
 - **Spawn sub-agents** for independent tasks that can run in parallel.
-- **Flag knowledge** worth remembering with the queue_knowledge tool during conversation.
-- **Reflect regularly.** Run `imp reflect` to process queued knowledge into the graph.
+- **Store knowledge** directly with store_knowledge, or flag it with queue_knowledge for later processing by `imp reflect`.
+- **Search your memory** with search_knowledge when asked to recall something specific.

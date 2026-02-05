@@ -215,7 +215,9 @@ impl ContextManager {
                 - **exec** — run shell commands (build, test, git, scripts, anything)\n\
                 - **spawn_agent** — spin up background sub-agents for parallel work; results auto-inject on completion\n\
                 - **check_agents** — check on running sub-agents (but prefer letting results come to you)\n\
-                - **queue_knowledge** — flag content worth remembering; processed into the knowledge graph by `imp reflect`\n\
+                - **store_knowledge** — immediately store entities, relationships, and memory chunks in the knowledge graph\n\
+                - **search_knowledge** — search memory chunks and look up entities/relationships on demand\n\
+                - **queue_knowledge** — flag content for deferred processing by `imp reflect`\n\
                 - **search_code** / **list_files** — explore codebases efficiently\n\
                 - **MCP tools** — external tool servers (if configured in ~/.imp/.mcp.json) provide additional capabilities\n\n\
                 Don't just describe what you'd do — use these tools and actually do it.\n\

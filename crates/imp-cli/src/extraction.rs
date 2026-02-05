@@ -212,6 +212,7 @@ impl From<ExtractedEntity> for Entity {
             entity_type: extracted.entity_type,
             name: extracted.name,
             properties: extracted.properties,
+            aliases: Vec::new(), // Aliases can be added later
             created_at: now,
             updated_at: now,
         }
@@ -439,6 +440,7 @@ pub fn process_extraction(
                         entity_type: existing.entity_type,
                         name: existing.name,
                         properties: JsonValue::Object(merged),
+                        aliases: existing.aliases,
                         created_at: existing.created_at,
                         updated_at: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -457,6 +459,7 @@ pub fn process_extraction(
             entity_type,
             name: extracted_entity.name.clone(),
             properties: extracted_entity.properties.clone(),
+            aliases: Vec::new(),
             created_at: 0.0, // Will be set by store_entity
             updated_at: 0.0, // Will be set by store_entity
         };

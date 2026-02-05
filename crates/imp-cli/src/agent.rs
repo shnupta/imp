@@ -614,6 +614,7 @@ impl Agent {
                     entity_type: entity_type.to_string(),
                     name: name.to_string(),
                     properties,
+                    aliases: Vec::new(),
                     created_at: 0.0,
                     updated_at: 0.0,
                 };

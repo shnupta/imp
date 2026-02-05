@@ -317,11 +317,16 @@ impl Agent {
                     style(format_tool_call(&tool_call.name, &tool_call.input)).dim()
                 );
 
-                // Intercept agent management tools — they need Agent state
+                // Intercept tools that need Agent state (KG, sub-agents)
                 let result = match tool_call.name.as_str() {
                     "spawn_agent" => self.handle_spawn_agent(&tool_call),
                     "check_agents" => {
                         let mut r = self.handle_check_agents().await;
+                        r.tool_use_id = tool_call.id.clone();
+                        r
+                    }
+                    "store_knowledge" => {
+                        let mut r = self.handle_store_knowledge(&tool_call.input);
                         r.tool_use_id = tool_call.id.clone();
                         r
                     }
@@ -487,6 +492,137 @@ impl Agent {
             .and_then(|mut f| f.write_all(entry.as_bytes()))
         {
             warn!(error = %e, "Memory write failed");
+        }
+    }
+
+    // ── Knowledge graph tools ─────────────────────────────────────────
+
+    /// Handle `store_knowledge` using the agent's existing KG instance
+    /// (avoids opening a second RocksDB handle which would fail with a lock error).
+    fn handle_store_knowledge(&self, arguments: &serde_json::Value) -> crate::tools::ToolResult {
+        let kg = match self.knowledge.get() {
+            Some(kg) => kg,
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some("Knowledge graph not available (still initializing or disabled)".to_string()),
+                };
+            }
+        };
+
+        let mut entities_added = 0usize;
+        let mut relationships_added = 0usize;
+        let mut chunks_stored = 0usize;
+
+        // Process entities
+        if let Some(entities) = arguments.get("entities").and_then(|v| v.as_array()) {
+            for entity_val in entities {
+                let name = match entity_val.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let entity_type = entity_val
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("concept");
+                let properties = entity_val
+                    .get("properties")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                // Skip if entity already exists
+                if let Ok(Some(_)) = kg.find_entity_by_name(name) {
+                    continue;
+                }
+
+                let entity = crate::knowledge::Entity {
+                    id: String::new(),
+                    entity_type: entity_type.to_string(),
+                    name: name.to_string(),
+                    properties,
+                    created_at: 0.0,
+                    updated_at: 0.0,
+                };
+
+                if kg.store_entity(entity).is_ok() {
+                    entities_added += 1;
+                }
+            }
+        }
+
+        // Process relationships
+        if let Some(rels) = arguments.get("relationships").and_then(|v| v.as_array()) {
+            for rel_val in rels {
+                let from_name = match rel_val.get("from").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let to_name = match rel_val.get("to").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let rel_type = match rel_val.get("rel").and_then(|v| v.as_str()) {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                let from = match kg.find_entity_by_name(from_name) {
+                    Ok(Some(e)) => e,
+                    _ => continue,
+                };
+                let to = match kg.find_entity_by_name(to_name) {
+                    Ok(Some(e)) => e,
+                    _ => continue,
+                };
+
+                let relationship = crate::knowledge::Relationship {
+                    id: String::new(),
+                    from_id: from.id,
+                    rel_type: rel_type.to_string(),
+                    to_id: to.id,
+                    properties: serde_json::Value::Object(serde_json::Map::new()),
+                    created_at: 0.0,
+                };
+
+                if kg.store_relationship(relationship).is_ok() {
+                    relationships_added += 1;
+                }
+            }
+        }
+
+        // Process chunks
+        if let Some(chunks) = arguments.get("chunks").and_then(|v| v.as_array()) {
+            for chunk_val in chunks {
+                let content = match chunk_val.get("content").and_then(|v| v.as_str()) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let source = chunk_val
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("conversation");
+
+                if kg.store_chunk(content, source, "live").is_ok() {
+                    chunks_stored += 1;
+                }
+            }
+        }
+
+        let total = entities_added + relationships_added + chunks_stored;
+        let content = if total == 0 {
+            "No new knowledge stored (entities may already exist).".to_string()
+        } else {
+            format!(
+                "Stored: {} entities, {} relationships, {} chunks",
+                entities_added, relationships_added, chunks_stored
+            )
+        };
+
+        crate::tools::ToolResult {
+            tool_use_id: String::new(),
+            content,
+            error: None,
         }
     }
 

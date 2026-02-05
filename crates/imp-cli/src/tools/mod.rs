@@ -141,6 +141,7 @@ impl ToolRegistry {
             self.create_spawn_agent_tool(),
             self.create_check_agents_tool(),
             self.create_queue_knowledge_tool(),
+            self.create_store_knowledge_tool(),
         ];
 
         for tool in builtins {
@@ -159,6 +160,7 @@ impl ToolRegistry {
             self.create_search_code_tool(),
             self.create_list_files_tool(),
             self.create_queue_knowledge_tool(),
+            self.create_store_knowledge_tool(),
         ];
 
         for tool in builtins {
@@ -639,6 +641,42 @@ impl ToolRegistry {
                         required: false,
                         default: Some(Value::Array(vec![])),
                         description: Some("Optional list of entity names you think are mentioned in the content.".to_string()),
+                    });
+                    params
+                },
+            },
+            handler: ToolHandler {
+                kind: "builtin".to_string(),
+                command: None,
+                script: None,
+            },
+        }
+    }
+
+    fn create_store_knowledge_tool(&self) -> ToolDefinition {
+        ToolDefinition {
+            tool: ToolMeta {
+                name: "store_knowledge".to_string(),
+                description: "Directly store entities, relationships, and memory chunks into the knowledge graph. Use this instead of queue_knowledge when you want to process knowledge immediately rather than deferring to `imp reflect`. You provide the structured extraction yourself — no separate LLM call needed.".to_string(),
+                parameters: {
+                    let mut params = HashMap::new();
+                    params.insert("entities".to_string(), ParameterDef {
+                        param_type: "array".to_string(),
+                        required: false,
+                        default: Some(Value::Array(vec![])),
+                        description: Some("Entities to store. Each: {\"name\": \"...\", \"type\": \"person|project|protocol|exchange|tool|concept|...\", \"properties\": {}}".to_string()),
+                    });
+                    params.insert("relationships".to_string(), ParameterDef {
+                        param_type: "array".to_string(),
+                        required: false,
+                        default: Some(Value::Array(vec![])),
+                        description: Some("Relationships to store. Each: {\"from\": \"entity_name\", \"rel\": \"works_on|uses|authored|related_to|part_of|...\", \"to\": \"entity_name\"}".to_string()),
+                    });
+                    params.insert("chunks".to_string(), ParameterDef {
+                        param_type: "array".to_string(),
+                        required: false,
+                        default: Some(Value::Array(vec![])),
+                        description: Some("Memory chunks to store for semantic search. Each: {\"content\": \"self-contained factual text\", \"source\": \"conversation|document|...\"}".to_string()),
                     });
                     params
                 },

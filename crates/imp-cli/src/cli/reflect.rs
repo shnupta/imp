@@ -230,9 +230,10 @@ Rules:
     println!("{}", style("🔍 Reflecting on files and extracting knowledge...").dim());
 
     let messages = vec![Message::text("user", &user_message)];
-    // Use generous output budget — reflection JSON includes full file contents + knowledge entries
+    // Use generous output budget — reflection JSON includes full file contents + knowledge entries.
+    // Needs to be high because thinking tokens (if enabled) eat into this budget too.
     let response = client
-        .send_message_with_options(messages, Some(system_prompt), None, false, Some(16_384))
+        .send_message_with_options(messages, Some(system_prompt), None, false, Some(32_768))
         .await?;
     let raw_response = client.extract_text_content(&response);
 

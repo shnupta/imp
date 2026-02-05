@@ -23,3 +23,5 @@ web/dist/
 *.db
 *.db-journal
 TASK.md
+vendor/
+TASK.md

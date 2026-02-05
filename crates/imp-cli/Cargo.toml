@@ -32,3 +32,10 @@ terminal_size = "0.4"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
+cozo = { version = "0.7", default-features = false, features = ["storage-rocksdb", "rayon"] }
+fastembed = { version = "4", optional = true }
+bm25 = "2.3.2"
+
+[features]
+default = ["embeddings"]
+embeddings = ["dep:fastembed"]

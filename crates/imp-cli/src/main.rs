@@ -14,15 +14,18 @@ mod compaction;
 mod config;
 mod context;
 mod db;
+mod embeddings;
 mod error;
+mod extraction;
 mod highlight;
+mod knowledge;
 mod logging;
 mod project;
 mod subagent;
 mod tools;
 mod usage;
 
-use cli::{bootstrap, chat, learn, login, oneshot, project_cmd, reflect};
+use cli::{bootstrap, chat, knowledge_cmd, learn, login, oneshot, project_cmd, reflect};
 
 #[derive(Parser)]
 #[command(name = "imp")]
@@ -76,6 +79,31 @@ enum Commands {
         #[command(subcommand)]
         command: ProjectCommands,
     },
+    /// Manage the knowledge graph
+    Knowledge {
+        #[command(subcommand)]
+        command: KnowledgeCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum KnowledgeCommands {
+    /// Show entity/relationship/chunk counts
+    Stats,
+    /// Show current schema types and relationship types
+    Schema,
+    /// Look up an entity by name and show relationships
+    Query {
+        /// Entity name to look up
+        name: String,
+    },
+    /// Search for chunks using semantic or text search
+    Search {
+        /// Search query
+        query: String,
+    },
+    /// Backfill embeddings for chunks that don't have them
+    BackfillEmbeddings,
 }
 
 #[derive(Subcommand)]
@@ -125,6 +153,23 @@ async fn main() -> Result<()> {
             }
             println!("\nSet in config.toml:\n\n  [display]\n  theme = \"{}\"", themes.first().unwrap_or(&"base16-ocean.dark".to_string()));
         }
+        Commands::Knowledge { command } => match command {
+            KnowledgeCommands::Stats => {
+                knowledge_cmd::stats()?;
+            }
+            KnowledgeCommands::Schema => {
+                knowledge_cmd::schema()?;
+            }
+            KnowledgeCommands::Query { name } => {
+                knowledge_cmd::query(&name)?;
+            }
+            KnowledgeCommands::Search { query } => {
+                knowledge_cmd::search(&query)?;
+            }
+            KnowledgeCommands::BackfillEmbeddings => {
+                knowledge_cmd::backfill_embeddings()?;
+            }
+        },
         Commands::Project { command } => match command {
             ProjectCommands::List => {
                 project_cmd::list()?;

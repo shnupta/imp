@@ -1,4 +1,4 @@
-use crate::client::{ClaudeClient, Message};
+use crate::client::{ClaudeClient, Message, ToolResult};
 use crate::compaction;
 use crate::config::{imp_home, Config};
 use crate::highlight;
@@ -18,7 +18,7 @@ use std::fs;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 // termimad used via highlight module
 
 /// Shared handle to a rustyline ExternalPrinter for output that doesn't garble
@@ -48,6 +48,10 @@ pub struct Agent {
     interrupt_flag: Option<Arc<AtomicBool>>,
     /// External printer for readline-safe output.
     printer: Option<SharedPrinter>,
+    /// Knowledge graph for entity/relationship storage and retrieval.
+    /// Wrapped in Arc<OnceLock> so it can be initialized in a background thread
+    /// without blocking the first chat message.
+    knowledge: Arc<OnceLock<crate::knowledge::KnowledgeGraph>>,
 }
 
 impl Agent {
@@ -97,6 +101,26 @@ impl Agent {
         let mut usage = UsageTracker::new();
         usage.set_model(&config.llm.model);
 
+        // Disable embeddings if configured, otherwise start loading in background
+        if !config.knowledge.embeddings_enabled {
+            crate::embeddings::Embedder::disable();
+        } else if config.knowledge.enabled {
+            crate::embeddings::Embedder::init_background();
+        }
+
+        // Open knowledge graph in background thread so it doesn't block first message.
+        // CozoDB + RocksDB open + schema check can take a moment on cold start.
+        let knowledge = Arc::new(OnceLock::new());
+        if config.knowledge.enabled {
+            let kg_cell = knowledge.clone();
+            std::thread::spawn(move || {
+                match crate::knowledge::KnowledgeGraph::open() {
+                    Ok(kg) => { let _ = kg_cell.set(kg); }
+                    Err(e) => eprintln!("⚠ Knowledge graph unavailable: {e}"),
+                }
+            });
+        }
+
         Ok(Self {
             client,
             config,
@@ -112,6 +136,7 @@ impl Agent {
             sub_agents: Vec::new(),
             interrupt_flag: None,
             printer: None,
+            knowledge,
         })
     }
 
@@ -141,7 +166,75 @@ impl Agent {
         self.process_message_with_options(user_message, false, true).await
     }
 
+    /// Repair orphaned tool_use blocks in the message history.
+    ///
+    /// When the agent is interrupted mid-tool-execution, the conversation history
+    /// may contain an assistant message with tool_use blocks but no corresponding
+    /// tool_result message. The Anthropic API requires every tool_use to have a
+    /// matching tool_result in the immediately following user message.
+    ///
+    /// This scans the last message and injects synthetic error tool_results
+    /// for any orphaned tool_use blocks.
+    fn repair_orphaned_tool_use(&mut self) {
+        let tool_use_ids: Vec<String> = match self.messages.last() {
+            Some(msg) if msg.role == "assistant" => {
+                match &msg.content {
+                    serde_json::Value::Array(blocks) => {
+                        blocks.iter()
+                            .filter_map(|block| {
+                                if block.get("type")?.as_str()? == "tool_use" {
+                                    block.get("id")?.as_str().map(|s| s.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    }
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+
+        if tool_use_ids.is_empty() {
+            return;
+        }
+
+        let count = tool_use_ids.len();
+        let results: Vec<ToolResult> = tool_use_ids
+            .into_iter()
+            .map(|id| ToolResult {
+                tool_use_id: id,
+                content: "Tool execution was interrupted by the user.".to_string(),
+                is_error: Some(true),
+            })
+            .collect();
+
+        let tool_msg = Message::tool_results(results);
+
+        // Persist to DB so resumed sessions are also repaired
+        if let Err(e) = self.db.save_message(
+            &self.session_id,
+            "user",
+            &tool_msg.content,
+            0,
+        ) {
+            self.emit(style(format!("⚠ DB write failed: {}", e)).dim());
+        }
+
+        self.messages.push(tool_msg);
+        self.emit(
+            style(format!(
+                "🔧 Repaired {} interrupted tool call(s) from previous turn",
+                count
+            )).dim()
+        );
+    }
+
     async fn process_message_with_options(&mut self, user_message: &str, stream: bool, render_markdown: bool) -> Result<String> {
+        // Repair any orphaned tool_use blocks from a previous interrupt
+        self.repair_orphaned_tool_use();
+
         // Before processing, check if any sub-agents have completed and enrich the message
         let completed = self.collect_completed_subagents().await;
         let effective_message = if !completed.is_empty() {
@@ -182,7 +275,19 @@ impl Agent {
                 return Err(ImpError::Agent("interrupted".to_string()));
             }
 
-            let system_prompt = self.context.assemble_system_prompt();
+            let mut system_prompt = self.context.assemble_system_prompt();
+            
+            // Retrieve and append relevant knowledge from knowledge graph
+            // (non-blocking — skipped if background init hasn't finished yet)
+            if let Some(kg) = self.knowledge.get() {
+                if let Ok(context) = kg.retrieve_context(&effective_message, 5, 5) {
+                    if !context.is_empty() {
+                        system_prompt.push_str("\n\n---\n\n");
+                        system_prompt.push_str(&context);
+                    }
+                }
+            }
+            
             let system_tokens = system_prompt.len() / 4;
             let tools = Some(self.tools.get_tool_schemas().await);
             let tool_tokens = tools.as_ref().map_or(0, |t| t.to_string().len() / 4);
@@ -280,11 +385,26 @@ impl Agent {
                     style(format_tool_call(&tool_call.name, &tool_call.input)).dim()
                 );
 
-                // Intercept agent management tools — they need Agent state
+                // Intercept tools that need Agent state (KG, sub-agents)
                 let result = match tool_call.name.as_str() {
                     "spawn_agent" => self.handle_spawn_agent(&tool_call),
                     "check_agents" => {
                         let mut r = self.handle_check_agents().await;
+                        r.tool_use_id = tool_call.id.clone();
+                        r
+                    }
+                    "store_knowledge" => {
+                        let mut r = self.handle_store_knowledge(&tool_call.input);
+                        r.tool_use_id = tool_call.id.clone();
+                        r
+                    }
+                    "search_knowledge" => {
+                        let mut r = self.handle_search_knowledge(&tool_call.input);
+                        r.tool_use_id = tool_call.id.clone();
+                        r
+                    }
+                    "add_alias" => {
+                        let mut r = self.handle_add_alias(&tool_call.input);
                         r.tool_use_id = tool_call.id.clone();
                         r
                     }
@@ -408,10 +528,14 @@ impl Agent {
 
     /// Distill structured insights from a conversation turn into the daily memory file.
     /// Only writes if the turn was substantive (had tool calls or a long response).
+    /// NOTE: Knowledge extraction happens in `imp reflect`, NOT here.
+    /// The agent flags content via the `queue_knowledge` tool during conversation;
+    /// reflect processes the queue later with full LLM extraction.
     fn maybe_distill_insights(&mut self, user_message: &str, response_text: &str, tool_count: usize) {
         if tool_count > 0 {
             self.total_tool_calls += tool_count;
         }
+
         if !AUTO_INSIGHTS {
             return;
         }
@@ -446,6 +570,311 @@ impl Agent {
             .and_then(|mut f| f.write_all(entry.as_bytes()))
         {
             warn!(error = %e, "Memory write failed");
+        }
+    }
+
+    // ── Knowledge graph tools ─────────────────────────────────────────
+
+    /// Handle `store_knowledge` using the agent's existing KG instance
+    /// (avoids opening a second RocksDB handle which would fail with a lock error).
+    fn handle_store_knowledge(&self, arguments: &serde_json::Value) -> crate::tools::ToolResult {
+        let kg = match self.knowledge.get() {
+            Some(kg) => kg,
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some("Knowledge graph not available (still initializing or disabled)".to_string()),
+                };
+            }
+        };
+
+        let mut entities_added = 0usize;
+        let mut relationships_added = 0usize;
+        let mut chunks_stored = 0usize;
+
+        // Process entities
+        if let Some(entities) = arguments.get("entities").and_then(|v| v.as_array()) {
+            for entity_val in entities {
+                let name = match entity_val.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let entity_type = entity_val
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("concept");
+                let properties = entity_val
+                    .get("properties")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                // Skip if entity already exists
+                if let Ok(Some(_)) = kg.find_entity_by_name(name) {
+                    continue;
+                }
+
+                let entity = crate::knowledge::Entity {
+                    id: String::new(),
+                    entity_type: entity_type.to_string(),
+                    name: name.to_string(),
+                    properties,
+                    aliases: Vec::new(),
+                    created_at: 0.0,
+                    updated_at: 0.0,
+                };
+
+                if kg.store_entity(entity).is_ok() {
+                    entities_added += 1;
+                }
+            }
+        }
+
+        // Process relationships
+        if let Some(rels) = arguments.get("relationships").and_then(|v| v.as_array()) {
+            for rel_val in rels {
+                let from_name = match rel_val.get("from").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let to_name = match rel_val.get("to").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let rel_type = match rel_val.get("rel").and_then(|v| v.as_str()) {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                let from = match kg.find_entity_by_name(from_name) {
+                    Ok(Some(e)) => e,
+                    _ => continue,
+                };
+                let to = match kg.find_entity_by_name(to_name) {
+                    Ok(Some(e)) => e,
+                    _ => continue,
+                };
+
+                let relationship = crate::knowledge::Relationship {
+                    id: String::new(),
+                    from_id: from.id,
+                    rel_type: rel_type.to_string(),
+                    to_id: to.id,
+                    properties: serde_json::Value::Object(serde_json::Map::new()),
+                    created_at: 0.0,
+                };
+
+                if kg.store_relationship(relationship).is_ok() {
+                    relationships_added += 1;
+                }
+            }
+        }
+
+        // Process chunks
+        if let Some(chunks) = arguments.get("chunks").and_then(|v| v.as_array()) {
+            for chunk_val in chunks {
+                let content = match chunk_val.get("content").and_then(|v| v.as_str()) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let source = chunk_val
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("conversation");
+
+                if kg.store_chunk(content, source, "live").is_ok() {
+                    chunks_stored += 1;
+                }
+            }
+        }
+
+        let total = entities_added + relationships_added + chunks_stored;
+        let content = if total == 0 {
+            "No new knowledge stored (entities may already exist).".to_string()
+        } else {
+            format!(
+                "Stored: {} entities, {} relationships, {} chunks",
+                entities_added, relationships_added, chunks_stored
+            )
+        };
+
+        crate::tools::ToolResult {
+            tool_use_id: String::new(),
+            content,
+            error: None,
+        }
+    }
+
+    /// Handle `search_knowledge` — explicit knowledge graph lookup.
+    fn handle_search_knowledge(&self, arguments: &serde_json::Value) -> crate::tools::ToolResult {
+        let kg = match self.knowledge.get() {
+            Some(kg) => kg,
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some("Knowledge graph not available (still initializing or disabled)".to_string()),
+                };
+            }
+        };
+
+        let query = arguments
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let max_results = arguments
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10) as usize;
+
+        let mut output = String::new();
+
+        // 1. Search memory chunks (semantic or text fallback)
+        match kg.search_similar(query, max_results) {
+            Ok(chunks) if !chunks.is_empty() => {
+                output.push_str(&format!("## Memory Chunks ({} results)\n\n", chunks.len()));
+                for (i, chunk) in chunks.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{}. [{}] {}\n",
+                        i + 1,
+                        chunk.source_type,
+                        chunk.content
+                    ));
+                }
+            }
+            Ok(_) => {
+                output.push_str("No matching memory chunks found.\n");
+            }
+            Err(e) => {
+                output.push_str(&format!("Chunk search error: {}\n", e));
+            }
+        }
+
+        // 2. Entity lookup — check if query matches any entity names
+        if let Some(entity_name) = arguments.get("entity").and_then(|v| v.as_str()) {
+            // Explicit entity lookup
+            match kg.find_entity_by_name(entity_name) {
+                Ok(Some(entity)) => {
+                    output.push_str(&format!(
+                        "\n## Entity: {} ({})\n",
+                        entity.name, entity.entity_type
+                    ));
+                    if entity.properties != serde_json::json!(null)
+                        && entity.properties != serde_json::json!({})
+                    {
+                        output.push_str(&format!("Properties: {}\n", entity.properties));
+                    }
+
+                    // Get relationships
+                    if let Ok(related) = kg.get_related(&entity.name, 1) {
+                        if !related.is_empty() {
+                            output.push_str("Relationships:\n");
+                            for r in &related {
+                                let arrow = if r.direction == "->" {
+                                    format!("{} → {} → {}", entity.name, r.rel_type, r.entity.name)
+                                } else {
+                                    format!("{} → {} → {}", r.entity.name, r.rel_type, entity.name)
+                                };
+                                output.push_str(&format!("  - {} ({})\n", arrow, r.entity.entity_type));
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    output.push_str(&format!("\nNo entity found matching '{}'.\n", entity_name));
+                }
+                Err(e) => {
+                    output.push_str(&format!("\nEntity lookup error: {}\n", e));
+                }
+            }
+        }
+
+        // 3. Stats summary
+        if let Ok(stats) = kg.stats() {
+            output.push_str(&format!(
+                "\n---\nKnowledge graph: {} entities, {} relationships, {} chunks\n",
+                stats.entity_count, stats.relationship_count, stats.chunk_count
+            ));
+        }
+
+        if output.trim().is_empty() {
+            output = "No results found.".to_string();
+        }
+
+        crate::tools::ToolResult {
+            tool_use_id: String::new(),
+            content: output,
+            error: None,
+        }
+    }
+
+    /// Handle `add_alias` — add an alias for an existing entity.
+    fn handle_add_alias(&self, arguments: &serde_json::Value) -> crate::tools::ToolResult {
+        let kg = match self.knowledge.get() {
+            Some(kg) => kg,
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some("Knowledge graph not available (still initializing or disabled)".to_string()),
+                };
+            }
+        };
+
+        let entity_name = match arguments.get("entity").and_then(|v| v.as_str()) {
+            Some(n) => n,
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some("Missing required parameter: entity".to_string()),
+                };
+            }
+        };
+
+        let alias = match arguments.get("alias").and_then(|v| v.as_str()) {
+            Some(a) => a,
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some("Missing required parameter: alias".to_string()),
+                };
+            }
+        };
+
+        // Find the entity first
+        let entity = match kg.find_entity_by_name(entity_name) {
+            Ok(Some(e)) => e,
+            Ok(None) => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some(format!("Entity not found: {}", entity_name)),
+                };
+            }
+            Err(e) => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some(format!("Error finding entity: {}", e)),
+                };
+            }
+        };
+
+        // Add the alias
+        match kg.store_alias(&entity.id, alias) {
+            Ok(_) => crate::tools::ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Added alias '{}' for entity '{}'", alias, entity.name),
+                error: None,
+            },
+            Err(e) => crate::tools::ToolResult {
+                tool_use_id: String::new(),
+                content: String::new(),
+                error: Some(format!("Error adding alias: {}", e)),
+            },
         }
     }
 

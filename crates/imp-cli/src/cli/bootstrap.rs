@@ -121,6 +121,7 @@ pub async fn run() -> Result<()> {
         auth: AuthConfig::default(),
         thinking: Default::default(),
         display: Default::default(),
+        knowledge: Default::default(),
     };
     
     // Auto-detect token type and configure auth

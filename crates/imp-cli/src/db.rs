@@ -3,6 +3,33 @@ use crate::error::{ImpError, Result};
 use rusqlite::{params, Connection};
 use serde_json::Value;
 
+/// Extract human-readable text from a message's JSON content.
+/// Handles both plain string content and structured content blocks,
+/// filtering out tool_use, tool_result, and thinking blocks.
+fn extract_readable_text(content_json: &str) -> String {
+    let value: Value = match serde_json::from_str(content_json) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+
+    match value {
+        Value::String(s) => s,
+        Value::Array(blocks) => {
+            blocks.iter()
+                .filter_map(|block| {
+                    let block_type = block.get("type")?.as_str()?;
+                    match block_type {
+                        "text" => block.get("text")?.as_str().map(|s| s.to_string()),
+                        _ => None, // Skip tool_use, tool_result, thinking
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        }
+        _ => String::new(),
+    }
+}
+
 pub struct SessionInfo {
     pub id: String,
     pub project: Option<String>,
@@ -244,6 +271,72 @@ impl Database {
             result.push(row.map_err(|e| ImpError::Database(e.to_string()))?);
         }
         Ok(result)
+    }
+
+    /// Load all conversations for a given date, formatted as readable text.
+    /// Returns a vec of (session_title, conversation_text) pairs.
+    /// Extracts only human-readable content (user text + assistant text),
+    /// skipping tool_use, tool_result, and thinking blocks.
+    pub fn load_conversations_for_date(&self, date: &str) -> Result<Vec<(String, String)>> {
+        // Find sessions active on this date
+        let mut session_stmt = self.conn.prepare(
+            "SELECT id, title FROM sessions \
+             WHERE date(created_at) = ?1 OR date(updated_at) = ?1 \
+             ORDER BY created_at ASC"
+        ).map_err(|e| ImpError::Database(e.to_string()))?;
+
+        let sessions: Vec<(String, Option<String>)> = session_stmt
+            .query_map(params![date], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|e| ImpError::Database(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut conversations = Vec::new();
+
+        for (session_id, title) in sessions {
+            // Skip subagent sessions — they're internal implementation detail
+            if title.as_deref().map_or(false, |t| t.starts_with("subagent")) {
+                continue;
+            }
+
+            let mut msg_stmt = self.conn.prepare(
+                "SELECT role, content FROM messages \
+                 WHERE session_id = ?1 AND date(created_at) = ?2 \
+                 ORDER BY id ASC"
+            ).map_err(|e| ImpError::Database(e.to_string()))?;
+
+            let messages: Vec<(String, String)> = msg_stmt
+                .query_map(params![session_id, date], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| ImpError::Database(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if messages.is_empty() {
+                continue;
+            }
+
+            let display_title = title.unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
+            let mut conv_text = String::new();
+
+            for (role, content_json) in &messages {
+                let text = extract_readable_text(content_json);
+                if text.is_empty() {
+                    continue;
+                }
+                let label = if role == "user" { "Human" } else { "Assistant" };
+                conv_text.push_str(&format!("**{}:** {}\n\n", label, text));
+            }
+
+            if !conv_text.is_empty() {
+                conversations.push((display_title, conv_text));
+            }
+        }
+
+        Ok(conversations)
     }
 
     /// Set a human-readable title on a session.

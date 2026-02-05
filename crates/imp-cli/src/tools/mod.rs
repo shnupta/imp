@@ -143,6 +143,7 @@ impl ToolRegistry {
             self.create_queue_knowledge_tool(),
             self.create_store_knowledge_tool(),
             self.create_search_knowledge_tool(),
+            self.create_add_alias_tool(),
         ];
 
         for tool in builtins {
@@ -163,6 +164,7 @@ impl ToolRegistry {
             self.create_queue_knowledge_tool(),
             self.create_store_knowledge_tool(),
             self.create_search_knowledge_tool(),
+            self.create_add_alias_tool(),
         ];
 
         for tool in builtins {
@@ -715,6 +717,36 @@ impl ToolRegistry {
                         required: false,
                         default: Some(Value::Array(vec![])),
                         description: Some("Memory chunks to store for semantic search. Each: {\"content\": \"self-contained factual text\", \"source\": \"conversation|document|...\"}".to_string()),
+                    });
+                    params
+                },
+            },
+            handler: ToolHandler {
+                kind: "builtin".to_string(),
+                command: None,
+                script: None,
+            },
+        }
+    }
+
+    fn create_add_alias_tool(&self) -> ToolDefinition {
+        ToolDefinition {
+            tool: ToolMeta {
+                name: "add_alias".to_string(),
+                description: "Add an alias (alternative name) for an existing entity in the knowledge graph. Aliases allow the entity to be found by different names. For example, 'Casey Williams' might have aliases 'Casey', 'CW'.".to_string(),
+                parameters: {
+                    let mut params = HashMap::new();
+                    params.insert("entity".to_string(), ParameterDef {
+                        param_type: "string".to_string(),
+                        required: true,
+                        default: None,
+                        description: Some("The name of the existing entity to add an alias for.".to_string()),
+                    });
+                    params.insert("alias".to_string(), ParameterDef {
+                        param_type: "string".to_string(),
+                        required: true,
+                        default: None,
+                        description: Some("The alias to add for the entity.".to_string()),
                     });
                     params
                 },

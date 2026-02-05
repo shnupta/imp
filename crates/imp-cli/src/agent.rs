@@ -403,6 +403,11 @@ impl Agent {
                         r.tool_use_id = tool_call.id.clone();
                         r
                     }
+                    "add_alias" => {
+                        let mut r = self.handle_add_alias(&tool_call.input);
+                        r.tool_use_id = tool_call.id.clone();
+                        r
+                    }
                     _ => {
                         self.tools
                             .execute_tool(&crate::tools::ToolCall {
@@ -801,6 +806,75 @@ impl Agent {
             tool_use_id: String::new(),
             content: output,
             error: None,
+        }
+    }
+
+    /// Handle `add_alias` — add an alias for an existing entity.
+    fn handle_add_alias(&self, arguments: &serde_json::Value) -> crate::tools::ToolResult {
+        let kg = match self.knowledge.get() {
+            Some(kg) => kg,
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some("Knowledge graph not available (still initializing or disabled)".to_string()),
+                };
+            }
+        };
+
+        let entity_name = match arguments.get("entity").and_then(|v| v.as_str()) {
+            Some(n) => n,
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some("Missing required parameter: entity".to_string()),
+                };
+            }
+        };
+
+        let alias = match arguments.get("alias").and_then(|v| v.as_str()) {
+            Some(a) => a,
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some("Missing required parameter: alias".to_string()),
+                };
+            }
+        };
+
+        // Find the entity first
+        let entity = match kg.find_entity_by_name(entity_name) {
+            Ok(Some(e)) => e,
+            Ok(None) => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some(format!("Entity not found: {}", entity_name)),
+                };
+            }
+            Err(e) => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some(format!("Error finding entity: {}", e)),
+                };
+            }
+        };
+
+        // Add the alias
+        match kg.store_alias(&entity.id, alias) {
+            Ok(_) => crate::tools::ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Added alias '{}' for entity '{}'", alias, entity.name),
+                error: None,
+            },
+            Err(e) => crate::tools::ToolResult {
+                tool_use_id: String::new(),
+                content: String::new(),
+                error: Some(format!("Error adding alias: {}", e)),
+            },
         }
     }
 

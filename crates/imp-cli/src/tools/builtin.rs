@@ -14,7 +14,7 @@ pub async fn execute_builtin(tool_name: &str, arguments: &Value) -> Result<Strin
         "queue_knowledge" => queue_knowledge(arguments).await,
         // These tools are intercepted by Agent before reaching here (they need
         // Agent state: knowledge graph handle, sub-agent tracking, etc.)
-        "store_knowledge" | "search_knowledge" | "spawn_agent" | "check_agents" => {
+        "store_knowledge" | "search_knowledge" | "add_alias" | "spawn_agent" | "check_agents" => {
             Err(ImpError::Tool(format!(
                 "'{}' must be handled by the Agent, not the builtin executor",
                 tool_name

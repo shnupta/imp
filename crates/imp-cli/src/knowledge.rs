@@ -657,28 +657,43 @@ impl KnowledgeGraph {
         Ok(chunks)
     }
 
-    /// Fallback text search using case-insensitive substring match.
+    /// Fallback text search using BM25 ranking when embeddings are unavailable.
+    /// Loads all chunks from CozoDB, builds an in-memory BM25 index, and returns
+    /// the top-k results ranked by relevance. Handles stemming, stop word removal,
+    /// and unicode normalization via the bm25 crate's default tokenizer.
     pub fn search_chunks_by_text(&self, query: &str, k: usize) -> Result<Vec<MemoryChunk>> {
-        let mut params = BTreeMap::new();
-        params.insert("query".to_string(), DataValue::Str(query.to_lowercase().into()));
-        params.insert("k".to_string(), DataValue::from(k as i64));
+        use bm25::{SearchEngineBuilder, Language};
 
+        // Load all chunks from CozoDB
         let result = self.run_query(
             r#"?[id, content, source_type, source_id, created_at, has_embedding, access_count, last_accessed] := 
-                *memory_chunk{id, content, source_type, source_id, created_at, has_embedding, access_count, last_accessed},
-                contains(lowercase(content), $query)
-                :limit $k"#,
-            params,
+                *memory_chunk{id, content, source_type, source_id, created_at, has_embedding, access_count, last_accessed}"#,
+            BTreeMap::new(),
         )?;
 
-        let chunks = Self::rows_to_chunks(&result);
+        let all_chunks = Self::rows_to_chunks(&result);
+        if all_chunks.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        // Update access counts
-        for chunk in &chunks {
+        // Build BM25 search engine from chunk contents
+        let corpus: Vec<String> = all_chunks.iter().map(|c| c.content.clone()).collect();
+        let engine: bm25::SearchEngine<u32> = SearchEngineBuilder::<u32>::with_corpus(Language::English, corpus).build();
+
+        let results = engine.search(query, k);
+
+        let matched_chunks: Vec<MemoryChunk> = results
+            .into_iter()
+            .filter(|r| r.score > 0.0)
+            .filter_map(|r| all_chunks.get(r.document.id as usize).cloned())
+            .collect();
+
+        // Update access counts for matched chunks
+        for chunk in &matched_chunks {
             self.increment_access_count(&chunk.id)?;
         }
 
-        Ok(chunks)
+        Ok(matched_chunks)
     }
 
     /// Check if a similar chunk already exists (for deduplication).

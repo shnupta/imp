@@ -92,17 +92,23 @@ pub async fn run(date: Option<String>) -> Result<()> {
             );
         }
 
-        // Append summary to daily file
+        // Write summary to daily file — replace existing reflect section if present
         let memory_dir = home.join("memory");
         let _ = std::fs::create_dir_all(&memory_dir);
 
-        let separator = if existing_daily_content.is_empty() {
-            format!("# {} — Daily Reflection\n\n", target_date)
+        let reflect_marker = "## Conversation Summary (from reflect)";
+        let reflect_section = format!("{}\n\n{}", reflect_marker, summary);
+
+        let new_content = if existing_daily_content.is_empty() {
+            format!("# {} — Daily Reflection\n\n{}", target_date, reflect_section)
+        } else if let Some(marker_pos) = existing_daily_content.find(reflect_marker) {
+            // Replace existing reflect section (from marker to end of file or next top-level heading)
+            let before = existing_daily_content[..marker_pos].trim_end();
+            format!("{}\n\n{}", before, reflect_section)
         } else {
-            "\n\n---\n\n## Conversation Summary (from reflect)\n\n".to_string()
+            format!("{}\n\n---\n\n{}", existing_daily_content, reflect_section)
         };
 
-        let new_content = format!("{}{}{}", existing_daily_content, separator, summary);
         std::fs::write(&daily_file, &new_content)?;
         println!("{}", style("  ✅ Conversation summary written to daily memory file").green());
 

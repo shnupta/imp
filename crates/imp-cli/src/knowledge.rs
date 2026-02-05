@@ -528,38 +528,58 @@ impl KnowledgeGraph {
     // Queries
     // ────────────────────────────────────────────────────────────
 
-    /// Find an entity by name or alias (case-insensitive, indexed).
+    /// Find an entity by name or alias (case-insensitive).
+    /// Tries indexed name_lower lookup first, falls back to lowercase(name) for old schemas.
     pub fn find_entity_by_name(&self, name: &str) -> Result<Option<Entity>> {
         let name_lower = name.to_lowercase();
         let mut params = BTreeMap::new();
-        params.insert("name_lower".to_string(), DataValue::Str(name_lower.into()));
+        params.insert("name_lower".to_string(), DataValue::Str(name_lower.clone().into()));
 
-        // 1. Search by name_lower (indexed)
+        // 1. Try search by name_lower column (indexed, new schema)
         let result = self.run_query(
-            r#"?[id, entity_type, name, properties, name_lower, created_at, updated_at] :=
+            r#"?[id, entity_type, name, properties, created_at, updated_at] :=
                 *entity{id, entity_type, name, properties, name_lower, created_at, updated_at},
                 name_lower == $name_lower"#,
             params.clone(),
-        )?;
-
-        if let Some(mut entity) = Self::rows_to_entities(&result).into_iter().next() {
-            entity.aliases = self.get_aliases(&entity.id)?;
-            return Ok(Some(entity));
+        );
+        
+        if let Ok(result) = result {
+            if let Some(mut entity) = Self::rows_to_entities(&result).into_iter().next() {
+                entity.aliases = self.get_aliases(&entity.id).unwrap_or_default();
+                return Ok(Some(entity));
+            }
+        }
+        
+        // 2. Fallback: search by lowercase(name) for old schemas without name_lower
+        let result = self.run_query(
+            r#"?[id, entity_type, name, properties, created_at, updated_at] :=
+                *entity{id, entity_type, name, properties, created_at, updated_at},
+                lowercase(name) == $name_lower"#,
+            params.clone(),
+        );
+        
+        if let Ok(result) = result {
+            if let Some(mut entity) = Self::rows_to_entities(&result).into_iter().next() {
+                entity.aliases = self.get_aliases(&entity.id).unwrap_or_default();
+                return Ok(Some(entity));
+            }
         }
 
-        // 2. Search by alias_lower (indexed via entity_alias table)
+        // 3. Search by alias_lower (entity_alias table)
         let result = self.run_query(
-            r#"?[id, entity_type, name, properties, name_lower, created_at, updated_at] :=
+            r#"?[id, entity_type, name, properties, created_at, updated_at] :=
                 *entity_alias{entity_id, alias_lower},
                 alias_lower == $name_lower,
-                *entity{id: entity_id, entity_type, name, properties, name_lower, created_at, updated_at},
+                *entity{id: entity_id, entity_type, name, properties, created_at, updated_at},
                 id = entity_id"#,
             params,
-        )?;
+        );
 
-        if let Some(mut entity) = Self::rows_to_entities(&result).into_iter().next() {
-            entity.aliases = self.get_aliases(&entity.id)?;
-            return Ok(Some(entity));
+        if let Ok(result) = result {
+            if let Some(mut entity) = Self::rows_to_entities(&result).into_iter().next() {
+                entity.aliases = self.get_aliases(&entity.id).unwrap_or_default();
+                return Ok(Some(entity));
+            }
         }
 
         Ok(None)
@@ -577,33 +597,33 @@ impl KnowledgeGraph {
 
         // 1-hop: direct relationships
         let result = self.run_query(
-            r#"?[other_id, other_type, other_name, other_props, other_name_lower, other_created, other_updated, rel_type, direction] :=
+            r#"?[other_id, other_type, other_name, other_props, other_created, other_updated, rel_type, direction] :=
                 *relationship{from_id: $eid, rel_type, to_id: other_id},
-                *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, name_lower: other_name_lower, created_at: other_created, updated_at: other_updated},
+                *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, created_at: other_created, updated_at: other_updated},
                 direction = "->"
-            ?[other_id, other_type, other_name, other_props, other_name_lower, other_created, other_updated, rel_type, direction] :=
+            ?[other_id, other_type, other_name, other_props, other_created, other_updated, rel_type, direction] :=
                 *relationship{from_id: other_id, rel_type, to_id: $eid},
-                *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, name_lower: other_name_lower, created_at: other_created, updated_at: other_updated},
+                *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, created_at: other_created, updated_at: other_updated},
                 direction = "<-""#,
             params.clone(),
         )?;
 
         let mut related: Vec<RelatedEntity> = Vec::new();
         for row in &result.rows {
-            if row.len() >= 9 {
+            if row.len() >= 8 {
                 let other = Entity {
                     id: dv_to_string(&row[0]),
                     entity_type: dv_to_string(&row[1]),
                     name: dv_to_string(&row[2]),
                     properties: dv_to_json(&row[3]),
                     aliases: Vec::new(), // Load separately if needed
-                    created_at: dv_to_f64(&row[5]),
-                    updated_at: dv_to_f64(&row[6]),
+                    created_at: dv_to_f64(&row[4]),
+                    updated_at: dv_to_f64(&row[5]),
                 };
                 related.push(RelatedEntity {
                     entity: other,
-                    rel_type: dv_to_string(&row[7]),
-                    direction: dv_to_string(&row[8]),
+                    rel_type: dv_to_string(&row[6]),
+                    direction: dv_to_string(&row[7]),
                 });
             }
         }
@@ -621,17 +641,17 @@ impl KnowledgeGraph {
 
             let result2 = self.run_query(
                 r#"hop1[hop1_id] := hop1_id in $hop1_ids
-                ?[other_id, other_type, other_name, other_props, other_name_lower, other_created, other_updated, rel_type, direction] :=
+                ?[other_id, other_type, other_name, other_props, other_created, other_updated, rel_type, direction] :=
                     hop1[hop1_id],
                     *relationship{from_id: hop1_id, rel_type, to_id: other_id},
-                    *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, name_lower: other_name_lower, created_at: other_created, updated_at: other_updated},
+                    *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, created_at: other_created, updated_at: other_updated},
                     other_id != $eid,
                     not hop1[other_id],
                     direction = "->"
-                ?[other_id, other_type, other_name, other_props, other_name_lower, other_created, other_updated, rel_type, direction] :=
+                ?[other_id, other_type, other_name, other_props, other_created, other_updated, rel_type, direction] :=
                     hop1[hop1_id],
                     *relationship{from_id: other_id, rel_type, to_id: hop1_id},
-                    *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, name_lower: other_name_lower, created_at: other_created, updated_at: other_updated},
+                    *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, created_at: other_created, updated_at: other_updated},
                     other_id != $eid,
                     not hop1[other_id],
                     direction = "<-""#,
@@ -639,20 +659,20 @@ impl KnowledgeGraph {
             )?;
 
             for row in &result2.rows {
-                if row.len() >= 9 {
+                if row.len() >= 8 {
                     let other = Entity {
                         id: dv_to_string(&row[0]),
                         entity_type: dv_to_string(&row[1]),
                         name: dv_to_string(&row[2]),
                         properties: dv_to_json(&row[3]),
                         aliases: Vec::new(), // Load separately if needed
-                        created_at: dv_to_f64(&row[5]),
-                        updated_at: dv_to_f64(&row[6]),
+                        created_at: dv_to_f64(&row[4]),
+                        updated_at: dv_to_f64(&row[5]),
                     };
                     related.push(RelatedEntity {
                         entity: other,
-                        rel_type: dv_to_string(&row[7]),
-                        direction: dv_to_string(&row[8]),
+                        rel_type: dv_to_string(&row[6]),
+                        direction: dv_to_string(&row[7]),
                     });
                 }
             }
@@ -1047,18 +1067,21 @@ impl KnowledgeGraph {
     /// Convert query rows to Entity structs.
     /// Expected columns: id, entity_type, name, properties, name_lower, created_at, updated_at
     /// Note: aliases are NOT included in query results; use get_aliases() to load them separately.
+    /// Convert query rows to Entity structs.
+    /// Expected columns: id, entity_type, name, properties, created_at, updated_at
+    /// Note: aliases are NOT included; use get_aliases() to load them separately.
     fn rows_to_entities(result: &NamedRows) -> Vec<Entity> {
         let mut entities = Vec::new();
         for row in &result.rows {
-            if row.len() >= 7 {
+            if row.len() >= 6 {
                 entities.push(Entity {
                     id: dv_to_string(&row[0]),
                     entity_type: dv_to_string(&row[1]),
                     name: dv_to_string(&row[2]),
                     properties: dv_to_json(&row[3]),
                     aliases: Vec::new(), // Load via get_aliases() if needed
-                    created_at: dv_to_f64(&row[5]),
-                    updated_at: dv_to_f64(&row[6]),
+                    created_at: dv_to_f64(&row[4]),
+                    updated_at: dv_to_f64(&row[5]),
                 });
             }
         }

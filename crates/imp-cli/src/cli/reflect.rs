@@ -324,8 +324,9 @@ async fn process_knowledge_queue() -> Result<ExtractionStats> {
     // Open knowledge graph
     let kg = KnowledgeGraph::open()?;
     
-    // Get current schema for LLM context
+    // Get current schema and existing entities for LLM context
     let schema = kg.get_schema()?;
+    let existing_entities = get_entity_names(&kg);
     
     // Initialize client
     let config = Config::load()?;
@@ -340,7 +341,7 @@ async fn process_knowledge_queue() -> Result<ExtractionStats> {
 
     // Process each queue entry
     for entry in &queue_entries {
-        match extract_knowledge_llm(&entry.content, &schema, &mut client).await {
+        match extract_knowledge_llm(&entry.content, &schema, &existing_entities, &mut client).await {
             Ok(extraction_result) => {
                 match process_extraction(&kg, &extraction_result) {
                     Ok(stats) => {
@@ -364,6 +365,34 @@ async fn process_knowledge_queue() -> Result<ExtractionStats> {
     clear_queue()?;
 
     Ok(total_stats)
+}
+
+/// Get all entity names from the knowledge graph (for dedup context in LLM prompts).
+fn get_entity_names(kg: &KnowledgeGraph) -> Vec<String> {
+    let params = std::collections::BTreeMap::new();
+    match kg.run_query(
+        "?[name, entity_type] := *entity{name, entity_type}",
+        params,
+    ) {
+        Ok(result) => {
+            result.rows.iter().filter_map(|row| {
+                if row.len() >= 2 {
+                    let name = match &row[0] {
+                        cozo::DataValue::Str(s) => s.to_string(),
+                        _ => return None,
+                    };
+                    let etype = match &row[1] {
+                        cozo::DataValue::Str(s) => s.to_string(),
+                        _ => return None,
+                    };
+                    Some(format!("{} ({})", name, etype))
+                } else {
+                    None
+                }
+            }).collect()
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Split text into chunks at paragraph boundaries, targeting ~max_chars per chunk.

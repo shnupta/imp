@@ -237,8 +237,8 @@ impl From<ExtractedRelationship> for Relationship {
     }
 }
 
-/// Build extraction prompt for the LLM that includes current schema.
-pub fn build_extraction_prompt(content: &str, schema: &SchemaInfo) -> String {
+/// Build extraction prompt for the LLM that includes current schema and existing entities.
+pub fn build_extraction_prompt(content: &str, schema: &SchemaInfo, existing_entities: &[String]) -> String {
     let types_list = schema.types.iter()
         .map(|t| format!("- {}: {}", t.type_name, t.description))
         .collect::<Vec<_>>()
@@ -249,13 +249,22 @@ pub fn build_extraction_prompt(content: &str, schema: &SchemaInfo) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    format!(r#"You are extracting structured knowledge from conversation content. 
+    let existing_section = if existing_entities.is_empty() {
+        String::from("(none yet)")
+    } else {
+        existing_entities.join(", ")
+    };
+
+    format!(r#"You are extracting structured knowledge from conversation content into a knowledge graph.
 
 Current schema types:
 {types_list}
 
 Current relationship types:
 {rels_list}
+
+Entities already in the graph:
+{existing_section}
 
 Extract from this content:
 ---
@@ -278,14 +287,18 @@ Return JSON:
 }}
 
 Rules:
-- Use existing types/relationships when possible
-- For NEW: prefixed items, provide clear descriptions
-- Extract only substantive, factual content
-- Chunks should be self-contained useful information
-- Entity names should be consistent and canonical (e.g., "NASDAQ" not "nasdaq")
-- Limit to the most important entities and relationships"#,
+- **DO NOT create duplicate entities.** Check the existing entities list above. If an entity already exists, reference it by its exact name — do not create a new one.
+- If new information applies to an existing entity, include it in the entities array with the same name — its properties will be merged.
+- Use existing types/relationships when possible.
+- For NEW: prefixed items, provide clear descriptions.
+- Extract only substantive, factual content — skip greetings, filler, and routine operations.
+- Chunks should be self-contained useful information.
+- Entity names should be consistent and canonical (e.g., "NASDAQ" not "nasdaq", "Casey" not "casey").
+- Create new entities only when genuinely new concepts/people/things appear.
+- Limit to the most important entities and relationships — quality over quantity."#,
         types_list = types_list,
         rels_list = rels_list,
+        existing_section = existing_section,
         content = content
     )
 }
@@ -409,15 +422,38 @@ pub fn process_extraction(
             }
         }
         
-        // Check if entity already exists
-        if let Ok(Some(_)) = kg.find_entity_by_name(&extracted_entity.name) {
-            // Entity exists, could merge properties here
+        // Check if entity already exists — merge properties if so
+        if let Ok(Some(existing)) = kg.find_entity_by_name(&extracted_entity.name) {
+            // Merge new properties into existing entity
+            if let (Some(existing_obj), Some(new_obj)) = (
+                existing.properties.as_object(),
+                extracted_entity.properties.as_object(),
+            ) {
+                if !new_obj.is_empty() {
+                    let mut merged = existing_obj.clone();
+                    for (k, v) in new_obj {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                    let updated = Entity {
+                        id: existing.id,
+                        entity_type: existing.entity_type,
+                        name: existing.name,
+                        properties: JsonValue::Object(merged),
+                        created_at: existing.created_at,
+                        updated_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs_f64(),
+                    };
+                    let _ = kg.store_entity(updated);
+                }
+            }
             continue;
         }
         
         // Create new entity
         let entity = Entity {
-            id: String::new(), // Will be set by store_entity
+            id: String::new(),
             entity_type,
             name: extracted_entity.name.clone(),
             properties: extracted_entity.properties.clone(),
@@ -499,9 +535,10 @@ pub fn process_extraction(
 pub async fn extract_knowledge_llm(
     content: &str, 
     schema: &SchemaInfo,
+    existing_entities: &[String],
     client: &mut crate::client::ClaudeClient
 ) -> Result<ExtractionResult> {
-    let prompt = build_extraction_prompt(content, schema);
+    let prompt = build_extraction_prompt(content, schema, existing_entities);
     
     let messages = vec![crate::client::Message::text("user", &prompt)];
     let response = client.send_message(messages, None, None, false)

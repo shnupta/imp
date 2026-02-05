@@ -18,7 +18,7 @@ use std::fs;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 // termimad used via highlight module
 
 /// Shared handle to a rustyline ExternalPrinter for output that doesn't garble
@@ -48,10 +48,9 @@ pub struct Agent {
     interrupt_flag: Option<Arc<AtomicBool>>,
     /// External printer for readline-safe output.
     printer: Option<SharedPrinter>,
-    /// Knowledge graph for entity/relationship storage and retrieval.
-    /// Wrapped in Arc<OnceLock> so it can be initialized in a background thread
-    /// without blocking the first chat message.
-    knowledge: Arc<OnceLock<crate::knowledge::KnowledgeGraph>>,
+    /// Whether the knowledge graph is enabled. KG is opened per-operation
+    /// to allow multiple sessions to share access (RocksDB lock released between ops).
+    knowledge_enabled: bool,
 }
 
 impl Agent {
@@ -108,18 +107,7 @@ impl Agent {
             crate::embeddings::Embedder::init_background();
         }
 
-        // Open knowledge graph in background thread so it doesn't block first message.
-        // CozoDB + RocksDB open + schema check can take a moment on cold start.
-        let knowledge = Arc::new(OnceLock::new());
-        if config.knowledge.enabled {
-            let kg_cell = knowledge.clone();
-            std::thread::spawn(move || {
-                match crate::knowledge::KnowledgeGraph::open() {
-                    Ok(kg) => { let _ = kg_cell.set(kg); }
-                    Err(e) => eprintln!("⚠ Knowledge graph unavailable: {e}"),
-                }
-            });
-        }
+        let knowledge_enabled = config.knowledge.enabled;
 
         Ok(Self {
             client,
@@ -136,7 +124,7 @@ impl Agent {
             sub_agents: Vec::new(),
             interrupt_flag: None,
             printer: None,
-            knowledge,
+            knowledge_enabled,
         })
     }
 
@@ -279,13 +267,17 @@ impl Agent {
             
             // Retrieve and append relevant knowledge from knowledge graph
             // (non-blocking — skipped if background init hasn't finished yet)
-            if let Some(kg) = self.knowledge.get() {
-                if let Ok(context) = kg.retrieve_context(&effective_message, 5, 5) {
-                    if !context.is_empty() {
-                        system_prompt.push_str("\n\n---\n\n");
-                        system_prompt.push_str(&context);
+            // Retrieve relevant knowledge (open KG briefly, then release lock)
+            if self.knowledge_enabled {
+                if let Ok(kg) = crate::knowledge::KnowledgeGraph::open() {
+                    if let Ok(context) = kg.retrieve_context(&effective_message, 5, 5) {
+                        if !context.is_empty() {
+                            system_prompt.push_str("\n\n---\n\n");
+                            system_prompt.push_str(&context);
+                        }
                     }
                 }
+                // kg dropped here, releasing RocksDB lock
             }
             
             let system_tokens = system_prompt.len() / 4;
@@ -575,16 +567,23 @@ impl Agent {
 
     // ── Knowledge graph tools ─────────────────────────────────────────
 
-    /// Handle `store_knowledge` using the agent's existing KG instance
-    /// (avoids opening a second RocksDB handle which would fail with a lock error).
+    /// Handle `store_knowledge` — opens KG for this operation then releases lock.
     fn handle_store_knowledge(&self, arguments: &serde_json::Value) -> crate::tools::ToolResult {
-        let kg = match self.knowledge.get() {
-            Some(kg) => kg,
-            None => {
+        if !self.knowledge_enabled {
+            return crate::tools::ToolResult {
+                tool_use_id: String::new(),
+                content: String::new(),
+                error: Some("Knowledge graph is disabled".to_string()),
+            };
+        }
+        
+        let kg = match crate::knowledge::KnowledgeGraph::open() {
+            Ok(kg) => kg,
+            Err(e) => {
                 return crate::tools::ToolResult {
                     tool_use_id: String::new(),
                     content: String::new(),
-                    error: Some("Knowledge graph not available (still initializing or disabled)".to_string()),
+                    error: Some(format!("Failed to open knowledge graph: {}", e)),
                 };
             }
         };
@@ -705,15 +704,23 @@ impl Agent {
         }
     }
 
-    /// Handle `search_knowledge` — explicit knowledge graph lookup.
+    /// Handle `search_knowledge` — opens KG for this operation then releases lock.
     fn handle_search_knowledge(&self, arguments: &serde_json::Value) -> crate::tools::ToolResult {
-        let kg = match self.knowledge.get() {
-            Some(kg) => kg,
-            None => {
+        if !self.knowledge_enabled {
+            return crate::tools::ToolResult {
+                tool_use_id: String::new(),
+                content: String::new(),
+                error: Some("Knowledge graph is disabled".to_string()),
+            };
+        }
+        
+        let kg = match crate::knowledge::KnowledgeGraph::open() {
+            Ok(kg) => kg,
+            Err(e) => {
                 return crate::tools::ToolResult {
                     tool_use_id: String::new(),
                     content: String::new(),
-                    error: Some("Knowledge graph not available (still initializing or disabled)".to_string()),
+                    error: Some(format!("Failed to open knowledge graph: {}", e)),
                 };
             }
         };
@@ -809,15 +816,23 @@ impl Agent {
         }
     }
 
-    /// Handle `add_alias` — add an alias for an existing entity.
+    /// Handle `add_alias` — opens KG for this operation then releases lock.
     fn handle_add_alias(&self, arguments: &serde_json::Value) -> crate::tools::ToolResult {
-        let kg = match self.knowledge.get() {
-            Some(kg) => kg,
-            None => {
+        if !self.knowledge_enabled {
+            return crate::tools::ToolResult {
+                tool_use_id: String::new(),
+                content: String::new(),
+                error: Some("Knowledge graph is disabled".to_string()),
+            };
+        }
+        
+        let kg = match crate::knowledge::KnowledgeGraph::open() {
+            Ok(kg) => kg,
+            Err(e) => {
                 return crate::tools::ToolResult {
                     tool_use_id: String::new(),
                     content: String::new(),
-                    error: Some("Knowledge graph not available (still initializing or disabled)".to_string()),
+                    error: Some(format!("Failed to open knowledge graph: {}", e)),
                 };
             }
         };

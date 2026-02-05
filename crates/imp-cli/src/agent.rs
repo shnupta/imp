@@ -330,6 +330,11 @@ impl Agent {
                         r.tool_use_id = tool_call.id.clone();
                         r
                     }
+                    "search_knowledge" => {
+                        let mut r = self.handle_search_knowledge(&tool_call.input);
+                        r.tool_use_id = tool_call.id.clone();
+                        r
+                    }
                     _ => {
                         self.tools
                             .execute_tool(&crate::tools::ToolCall {
@@ -622,6 +627,110 @@ impl Agent {
         crate::tools::ToolResult {
             tool_use_id: String::new(),
             content,
+            error: None,
+        }
+    }
+
+    /// Handle `search_knowledge` — explicit knowledge graph lookup.
+    fn handle_search_knowledge(&self, arguments: &serde_json::Value) -> crate::tools::ToolResult {
+        let kg = match self.knowledge.get() {
+            Some(kg) => kg,
+            None => {
+                return crate::tools::ToolResult {
+                    tool_use_id: String::new(),
+                    content: String::new(),
+                    error: Some("Knowledge graph not available (still initializing or disabled)".to_string()),
+                };
+            }
+        };
+
+        let query = arguments
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let max_results = arguments
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10) as usize;
+
+        let mut output = String::new();
+
+        // 1. Search memory chunks (semantic or text fallback)
+        match kg.search_similar(query, max_results) {
+            Ok(chunks) if !chunks.is_empty() => {
+                output.push_str(&format!("## Memory Chunks ({} results)\n\n", chunks.len()));
+                for (i, chunk) in chunks.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{}. [{}] {}\n",
+                        i + 1,
+                        chunk.source_type,
+                        chunk.content
+                    ));
+                }
+            }
+            Ok(_) => {
+                output.push_str("No matching memory chunks found.\n");
+            }
+            Err(e) => {
+                output.push_str(&format!("Chunk search error: {}\n", e));
+            }
+        }
+
+        // 2. Entity lookup — check if query matches any entity names
+        if let Some(entity_name) = arguments.get("entity").and_then(|v| v.as_str()) {
+            // Explicit entity lookup
+            match kg.find_entity_by_name(entity_name) {
+                Ok(Some(entity)) => {
+                    output.push_str(&format!(
+                        "\n## Entity: {} ({})\n",
+                        entity.name, entity.entity_type
+                    ));
+                    if entity.properties != serde_json::json!(null)
+                        && entity.properties != serde_json::json!({})
+                    {
+                        output.push_str(&format!("Properties: {}\n", entity.properties));
+                    }
+
+                    // Get relationships
+                    if let Ok(related) = kg.get_related(&entity.name, 1) {
+                        if !related.is_empty() {
+                            output.push_str("Relationships:\n");
+                            for r in &related {
+                                let arrow = if r.direction == "->" {
+                                    format!("{} → {} → {}", entity.name, r.rel_type, r.entity.name)
+                                } else {
+                                    format!("{} → {} → {}", r.entity.name, r.rel_type, entity.name)
+                                };
+                                output.push_str(&format!("  - {} ({})\n", arrow, r.entity.entity_type));
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    output.push_str(&format!("\nNo entity found matching '{}'.\n", entity_name));
+                }
+                Err(e) => {
+                    output.push_str(&format!("\nEntity lookup error: {}\n", e));
+                }
+            }
+        }
+
+        // 3. Stats summary
+        if let Ok(stats) = kg.stats() {
+            output.push_str(&format!(
+                "\n---\nKnowledge graph: {} entities, {} relationships, {} chunks\n",
+                stats.entity_count, stats.relationship_count, stats.chunk_count
+            ));
+        }
+
+        if output.trim().is_empty() {
+            output = "No results found.".to_string();
+        }
+
+        crate::tools::ToolResult {
+            tool_use_id: String::new(),
+            content: output,
             error: None,
         }
     }

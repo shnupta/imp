@@ -142,6 +142,7 @@ impl ToolRegistry {
             self.create_check_agents_tool(),
             self.create_queue_knowledge_tool(),
             self.create_store_knowledge_tool(),
+            self.create_search_knowledge_tool(),
         ];
 
         for tool in builtins {
@@ -161,6 +162,7 @@ impl ToolRegistry {
             self.create_list_files_tool(),
             self.create_queue_knowledge_tool(),
             self.create_store_knowledge_tool(),
+            self.create_search_knowledge_tool(),
         ];
 
         for tool in builtins {
@@ -641,6 +643,42 @@ impl ToolRegistry {
                         required: false,
                         default: Some(Value::Array(vec![])),
                         description: Some("Optional list of entity names you think are mentioned in the content.".to_string()),
+                    });
+                    params
+                },
+            },
+            handler: ToolHandler {
+                kind: "builtin".to_string(),
+                command: None,
+                script: None,
+            },
+        }
+    }
+
+    fn create_search_knowledge_tool(&self) -> ToolDefinition {
+        ToolDefinition {
+            tool: ToolMeta {
+                name: "search_knowledge".to_string(),
+                description: "Search the knowledge graph for stored memories, entities, and relationships. Use when the user asks you to recall something, look up past context, or find information from previous conversations.".to_string(),
+                parameters: {
+                    let mut params = HashMap::new();
+                    params.insert("query".to_string(), ParameterDef {
+                        param_type: "string".to_string(),
+                        required: true,
+                        default: None,
+                        description: Some("Search query — used for semantic/text search over memory chunks.".to_string()),
+                    });
+                    params.insert("entity".to_string(), ParameterDef {
+                        param_type: "string".to_string(),
+                        required: false,
+                        default: None,
+                        description: Some("Optional entity name to look up directly (exact match). Returns the entity and its relationships.".to_string()),
+                    });
+                    params.insert("max_results".to_string(), ParameterDef {
+                        param_type: "integer".to_string(),
+                        required: false,
+                        default: Some(Value::Number(serde_json::Number::from(10))),
+                        description: Some("Maximum number of memory chunks to return (default: 10).".to_string()),
                     });
                     params
                 },

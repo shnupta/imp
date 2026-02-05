@@ -89,9 +89,8 @@ pub async fn run(date: Option<String>) -> Result<()> {
         );
 
         let messages = vec![Message::text("user", &summary_prompt)];
-        // Disable thinking for structured extraction — gives full token budget to output
         let response = client
-            .send_message_inner(messages, None, None, false, Some(16_384), Some(false))
+            .send_message_with_options(messages, None, None, false, Some(64_000))
             .await?;
         let daily_summary = client.extract_text_content(&response);
 
@@ -227,9 +226,9 @@ Rules:
     println!("{}", style("🔍 Reflecting on files and extracting knowledge...").dim());
 
     let messages = vec![Message::text("user", &user_message)];
-    // Disable thinking for structured extraction — gives full token budget to output.
+    // Generous budget — thinking + output both need room.
     let response = client
-        .send_message_inner(messages, Some(system_prompt), None, false, Some(16_384), Some(false))
+        .send_message_with_options(messages, Some(system_prompt), None, false, Some(64_000))
         .await?;
     let raw_response = client.extract_text_content(&response);
 

@@ -56,6 +56,26 @@ pub async fn run(date: Option<String>) -> Result<()> {
     let conversation_summary = if has_conversations {
         println!("{}", style("📝 Summarizing conversations...").dim());
 
+        // Cap conversation text to avoid blowing token budget on summarization
+        let max_conv_chars: usize = 80_000; // ~20k tokens
+        let capped_conversation_text = if conversation_text.len() > max_conv_chars {
+            println!(
+                "{}",
+                style(format!(
+                    "  Conversations are large ({} chars), truncating to {}",
+                    conversation_text.len(), max_conv_chars
+                )).dim()
+            );
+            // Truncate at a paragraph boundary
+            let slice = &conversation_text[..max_conv_chars];
+            match slice.rfind("\n\n") {
+                Some(pos) if pos > max_conv_chars / 2 => slice[..pos].to_string(),
+                _ => slice.to_string(),
+            }
+        } else {
+            conversation_text.clone()
+        };
+
         let summary_prompt = format!(
             "You are summarizing a day's conversations for a personal AI agent's memory file.\n\n\
             Review these conversations and produce a concise summary of what happened, \
@@ -74,7 +94,7 @@ pub async fn run(date: Option<String>) -> Result<()> {
             ---\n{}\n---\n\n\
             Write the conversation summary now (markdown, no JSON wrapping):",
             if existing_daily_content.is_empty() { "(none)" } else { &existing_daily_content },
-            &conversation_text
+            &capped_conversation_text
         );
 
         let messages = vec![Message::text("user", &summary_prompt)];
@@ -158,12 +178,10 @@ pub async fn run(date: Option<String>) -> Result<()> {
 
     let system_prompt = format!("\
 You are a reflective memory system for a personal AI agent. You review a day's \
-interactions — including full conversation transcripts from the database and daily notes — \
-and decide what should be persisted to long-term files.
+interactions and decide what should be persisted to long-term files.
 
 You will be given:
-- The day's notes and conversation summary
-- Full conversation transcripts from the database (the richest source of information)
+- The day's notes (including conversation summaries extracted from the database)
 - Current contents of the agent's core files
 
 Your job is to produce a JSON response with this exact structure:
@@ -223,14 +241,6 @@ Rules:
         "## Today's Notes ({})\n\n{}\n\n---\n\n",
         target_date, daily_content
     ));
-
-    // Include full conversation transcripts for the LLM to mine
-    if has_conversations {
-        user_message.push_str(&format!(
-            "## Full Conversation Transcripts ({})\n\n{}\n\n---\n\n",
-            target_date, conversation_text
-        ));
-    }
 
     user_message.push_str(
         "Reflect on today's interactions and produce the JSON response. \

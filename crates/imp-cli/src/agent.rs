@@ -1,4 +1,4 @@
-use crate::client::{ClaudeClient, Message};
+use crate::client::{ClaudeClient, Message, ToolResult};
 use crate::compaction;
 use crate::config::{imp_home, Config};
 use crate::highlight;
@@ -166,7 +166,75 @@ impl Agent {
         self.process_message_with_options(user_message, false, true).await
     }
 
+    /// Repair orphaned tool_use blocks in the message history.
+    ///
+    /// When the agent is interrupted mid-tool-execution, the conversation history
+    /// may contain an assistant message with tool_use blocks but no corresponding
+    /// tool_result message. The Anthropic API requires every tool_use to have a
+    /// matching tool_result in the immediately following user message.
+    ///
+    /// This scans the last message and injects synthetic error tool_results
+    /// for any orphaned tool_use blocks.
+    fn repair_orphaned_tool_use(&mut self) {
+        let tool_use_ids: Vec<String> = match self.messages.last() {
+            Some(msg) if msg.role == "assistant" => {
+                match &msg.content {
+                    serde_json::Value::Array(blocks) => {
+                        blocks.iter()
+                            .filter_map(|block| {
+                                if block.get("type")?.as_str()? == "tool_use" {
+                                    block.get("id")?.as_str().map(|s| s.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    }
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+
+        if tool_use_ids.is_empty() {
+            return;
+        }
+
+        let count = tool_use_ids.len();
+        let results: Vec<ToolResult> = tool_use_ids
+            .into_iter()
+            .map(|id| ToolResult {
+                tool_use_id: id,
+                content: "Tool execution was interrupted by the user.".to_string(),
+                is_error: Some(true),
+            })
+            .collect();
+
+        let tool_msg = Message::tool_results(results);
+
+        // Persist to DB so resumed sessions are also repaired
+        if let Err(e) = self.db.save_message(
+            &self.session_id,
+            "user",
+            &tool_msg.content,
+            0,
+        ) {
+            self.emit(style(format!("⚠ DB write failed: {}", e)).dim());
+        }
+
+        self.messages.push(tool_msg);
+        self.emit(
+            style(format!(
+                "🔧 Repaired {} interrupted tool call(s) from previous turn",
+                count
+            )).dim()
+        );
+    }
+
     async fn process_message_with_options(&mut self, user_message: &str, stream: bool, render_markdown: bool) -> Result<String> {
+        // Repair any orphaned tool_use blocks from a previous interrupt
+        self.repair_orphaned_tool_use();
+
         // Before processing, check if any sub-agents have completed and enrich the message
         let completed = self.collect_completed_subagents().await;
         let effective_message = if !completed.is_empty() {

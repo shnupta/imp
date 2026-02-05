@@ -53,81 +53,70 @@ pub async fn run(date: Option<String>) -> Result<()> {
         String::new()
     };
 
-    let conversation_summary = if has_conversations {
-        println!("{}", style("📝 Summarizing conversations...").dim());
+    // If no daily content and no conversations, nothing to reflect on
+    if existing_daily_content.trim().is_empty() && !has_conversations {
+        println!("Nothing to reflect on for {} — no memory file and no conversations.", target_date);
+        return Ok(());
+    }
 
+    // Summarize conversations and rewrite the daily file as a single consolidated document.
+    // The LLM sees both the existing notes and full conversations, producing the definitive
+    // daily record. This is idempotent — running reflect multiple times yields the same result.
+    println!("{}", style("📝 Consolidating daily memory file...").dim());
+    {
         let summary_prompt = format!(
-            "You are summarizing a day's conversations for a personal AI agent's memory file.\n\n\
-            Review these conversations and produce a concise summary of what happened, \
-            what was discussed, decisions made, problems solved, and anything notable.\n\n\
-            Focus on:\n\
-            - Key topics and what was accomplished\n\
-            - Decisions made or preferences expressed\n\
-            - Technical work done (projects, bugs, features)\n\
-            - Personal info learned about the human\n\
-            - Open threads or follow-ups needed\n\n\
-            Format as markdown sections. Be concise but capture substance.\n\
-            Do NOT include routine tool usage, timestamps, or token counts.\n\n\
-            Existing daily notes (don't duplicate what's already captured):\n\
-            ---\n{}\n---\n\n\
-            Today's conversations:\n\
-            ---\n{}\n---\n\n\
-            Write the conversation summary now (markdown, no JSON wrapping):",
+            "You are writing the definitive daily memory file for a personal AI agent.\n\n\
+            You have two sources:\n\
+            1. Existing daily notes (may contain auto-generated session markers, previous reflect output, or manual notes)\n\
+            2. Full conversation transcripts from the database\n\n\
+            Produce a single, clean, consolidated markdown document that captures EVERYTHING \
+            important from the day. This REPLACES the entire daily file.\n\n\
+            Structure it as:\n\
+            - `# YYYY-MM-DD` header\n\
+            - Sections for major topics/sessions\n\
+            - Key decisions, accomplishments, technical details\n\
+            - Open threads or follow-ups\n\n\
+            Rules:\n\
+            - Be thorough — this is the only record of the day\n\
+            - Be concise — capture substance, skip noise (token counts, tool call counts, timestamps)\n\
+            - Preserve any important information from the existing notes\n\
+            - Don't invent information not present in the sources\n\n\
+            Existing daily notes:\n---\n{}\n---\n\n\
+            Today's conversations:\n---\n{}\n---\n\n\
+            Write the complete daily memory file now (markdown, no JSON wrapping):",
             if existing_daily_content.is_empty() { "(none)" } else { &existing_daily_content },
-            &conversation_text
+            if has_conversations { &conversation_text } else { "(no conversations recorded)" }
         );
 
         let messages = vec![Message::text("user", &summary_prompt)];
-        let response = client.send_message(messages, None, None, false).await?;
-        let summary = client.extract_text_content(&response);
+        let response = client
+            .send_message_with_options(messages, None, None, false, Some(16_384))
+            .await?;
+        let daily_summary = client.extract_text_content(&response);
 
         if let Some(ref usage) = response.usage {
             println!(
                 "{}",
                 style(format!(
-                    "  summary tokens: {} in / {} out",
+                    "  daily file tokens: {} in / {} out",
                     usage.input_tokens, usage.output_tokens
                 ))
                 .dim()
             );
         }
 
-        // Write summary to daily file — replace existing reflect section if present
         let memory_dir = home.join("memory");
         let _ = std::fs::create_dir_all(&memory_dir);
+        std::fs::write(&daily_file, &daily_summary)?;
+        println!("{}", style("  ✅ Daily memory file rewritten").green());
+    }
 
-        let reflect_marker = "## Conversation Summary (from reflect)";
-        let reflect_section = format!("{}\n\n{}", reflect_marker, summary);
-
-        let new_content = if existing_daily_content.is_empty() {
-            format!("# {} — Daily Reflection\n\n{}", target_date, reflect_section)
-        } else if let Some(marker_pos) = existing_daily_content.find(reflect_marker) {
-            // Replace existing reflect section (from marker to end of file or next top-level heading)
-            let before = existing_daily_content[..marker_pos].trim_end();
-            format!("{}\n\n{}", before, reflect_section)
-        } else {
-            format!("{}\n\n---\n\n{}", existing_daily_content, reflect_section)
-        };
-
-        std::fs::write(&daily_file, &new_content)?;
-        println!("{}", style("  ✅ Conversation summary written to daily memory file").green());
-
-        summary
-    } else {
-        String::new()
-    };
-
-    // If no daily content and no conversations, nothing to reflect on
+    // Reload daily content (now the consolidated version)
     let daily_content = if daily_file.exists() {
         std::fs::read_to_string(&daily_file)?
     } else {
         String::new()
     };
-
-    if daily_content.trim().is_empty() && !has_conversations {
-        println!("Nothing to reflect on for {} — no memory file and no conversations.", target_date);
-        return Ok(());
-    }
 
     // ══════════════════════════════════════════════════════════════════
     // PHASE 3: REFLECT ON FILES (MEMORY.md, USER.md, SOUL.md, etc.)
@@ -239,7 +228,7 @@ Rules:
     // Use generous output budget — reflection JSON includes full file contents + knowledge entries.
     // Needs to be high because thinking tokens (if enabled) eat into this budget too.
     let response = client
-        .send_message_with_options(messages, Some(system_prompt), None, false, Some(32_768))
+        .send_message_with_options(messages, Some(system_prompt), None, false, Some(64_000))
         .await?;
     let raw_response = client.extract_text_content(&response);
 

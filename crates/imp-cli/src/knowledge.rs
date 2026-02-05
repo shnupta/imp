@@ -154,8 +154,8 @@ impl KnowledgeGraph {
                 entity_type: String,
                 name: String,
                 =>
-                properties: Json,
                 name_lower: String default "",
+                properties: Json,
                 created_at: Float,
                 updated_at: Float
             }"#,
@@ -238,6 +238,20 @@ impl KnowledgeGraph {
                 ef_construction: 200,
                 filter: has_embedding
             }"#,
+            BTreeMap::new(),
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("already exists") && !msg.contains("conflicts") {
+                    return Err(e);
+                }
+            }
+        }
+
+        // Create index on entity.name_lower for fast case-insensitive lookups.
+        match self.run_mutating(
+            r#"::index create entity:name_lower_idx { name_lower, id }"#,
             BTreeMap::new(),
         ) {
             Ok(_) => {}

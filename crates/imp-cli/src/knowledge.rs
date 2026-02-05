@@ -249,20 +249,6 @@ impl KnowledgeGraph {
             }
         }
 
-        // Create index on entity.name_lower for fast case-insensitive lookups.
-        match self.run_mutating(
-            r#"::index create entity:name_lower_idx { name_lower, id }"#,
-            BTreeMap::new(),
-        ) {
-            Ok(_) => {}
-            Err(e) => {
-                let msg = e.to_string();
-                if !msg.contains("already exists") && !msg.contains("conflicts") {
-                    return Err(e);
-                }
-            }
-        }
-
         // Seed initial schema if empty (non-fatal — these are just defaults)
         if let Err(e) = self.seed_schema() {
             tracing::warn!(error = %e, "Failed to seed default schema (non-fatal)");
@@ -293,19 +279,21 @@ impl KnowledgeGraph {
             
             // Migration 1: Add name_lower column if missing
             if !col_names.iter().any(|c| c == "name_lower") {
-                let _ = self.db.run_script(
+                if let Err(e) = self.db.run_script(
                     "::alter entity { +name_lower: String default \"\" }",
                     BTreeMap::new(),
                     ScriptMutability::Mutable,
-                );
-                
-                // Backfill name_lower for existing entities
-                let _ = self.db.run_script(
-                    r#"?[id, name_lower] := *entity{id, name}, name_lower = lowercase(name)
-                    :update entity { id => name_lower }"#,
-                    BTreeMap::new(),
-                    ScriptMutability::Mutable,
-                );
+                ) {
+                    tracing::warn!(error = %e, "Failed to add name_lower column");
+                } else {
+                    // Backfill name_lower for existing entities
+                    let _ = self.db.run_script(
+                        r#"?[id, name_lower] := *entity{id, name}, name_lower = lowercase(name)
+                        :update entity { id => name_lower }"#,
+                        BTreeMap::new(),
+                        ScriptMutability::Mutable,
+                    );
+                }
             }
             
             // Migration 2: Migrate old aliases array to entity_alias table
@@ -334,6 +322,13 @@ impl KnowledgeGraph {
                 // It will just be ignored going forward
             }
         }
+        
+        // Create index on name_lower (runs for both new and migrated DBs, ignores if exists)
+        let _ = self.db.run_script(
+            "::index create entity:name_lower_idx { name_lower, id }",
+            BTreeMap::new(),
+            ScriptMutability::Mutable,
+        );
 
         Ok(())
     }

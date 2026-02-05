@@ -657,16 +657,16 @@ impl KnowledgeGraph {
         Ok(chunks)
     }
 
-    /// Fallback text search using LIKE/contains.
+    /// Fallback text search using case-insensitive substring match.
     pub fn search_chunks_by_text(&self, query: &str, k: usize) -> Result<Vec<MemoryChunk>> {
         let mut params = BTreeMap::new();
-        params.insert("query".to_string(), DataValue::Str(format!("%{}%", query).into()));
+        params.insert("query".to_string(), DataValue::Str(query.to_lowercase().into()));
         params.insert("k".to_string(), DataValue::from(k as i64));
 
         let result = self.run_query(
             r#"?[id, content, source_type, source_id, created_at, has_embedding, access_count, last_accessed] := 
                 *memory_chunk{id, content, source_type, source_id, created_at, has_embedding, access_count, last_accessed},
-                content ~ $query
+                contains(lowercase(content), $query)
                 :limit $k"#,
             params,
         )?;

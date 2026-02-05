@@ -29,7 +29,7 @@ pub struct Entity {
     pub entity_type: String,
     pub name: String,
     pub properties: JsonValue,
-    pub aliases: Vec<String>,
+    pub aliases: Vec<String>, // Loaded from entity_alias table
     pub created_at: f64,
     pub updated_at: f64,
 }
@@ -155,9 +155,16 @@ impl KnowledgeGraph {
                 name: String,
                 =>
                 properties: Json,
-                aliases: [String] default [],
+                name_lower: String default "",
                 created_at: Float,
                 updated_at: Float
+            }"#,
+            // Separate table for aliases with indexed case-insensitive search
+            r#":create entity_alias {
+                entity_id: String,
+                alias_lower: String,
+                =>
+                alias: String
             }"#,
             r#":create relationship {
                 id: String,
@@ -253,7 +260,6 @@ impl KnowledgeGraph {
     /// Run schema migrations for existing databases.
     /// Adds new columns that may not exist in older databases.
     fn run_migrations(&self) -> Result<()> {
-        // Migration 1: Add aliases column to entity if missing
         // Check columns on entity relation
         let result = self.db.run_script(
             "::columns entity",
@@ -262,22 +268,56 @@ impl KnowledgeGraph {
         );
         
         if let Ok(cols) = result {
-            let has_aliases = cols.rows.iter().any(|row| {
-                row.first()
-                    .and_then(|v| match v {
-                        DataValue::Str(s) => Some(s.as_str() == "aliases"),
+            let col_names: Vec<String> = cols.rows.iter()
+                .filter_map(|row| {
+                    row.first().and_then(|v| match v {
+                        DataValue::Str(s) => Some(s.to_string()),
                         _ => None,
                     })
-                    .unwrap_or(false)
-            });
+                })
+                .collect();
             
-            if !has_aliases {
-                // Add aliases column to existing entity table
+            // Migration 1: Add name_lower column if missing
+            if !col_names.iter().any(|c| c == "name_lower") {
                 let _ = self.db.run_script(
-                    "::alter entity { +aliases: [String] default [] }",
+                    "::alter entity { +name_lower: String default \"\" }",
                     BTreeMap::new(),
                     ScriptMutability::Mutable,
                 );
+                
+                // Backfill name_lower for existing entities
+                let _ = self.db.run_script(
+                    r#"?[id, name_lower] := *entity{id, name}, name_lower = lowercase(name)
+                    :update entity { id => name_lower }"#,
+                    BTreeMap::new(),
+                    ScriptMutability::Mutable,
+                );
+            }
+            
+            // Migration 2: Migrate old aliases array to entity_alias table
+            if col_names.iter().any(|c| c == "aliases") {
+                // Check if entity_alias table exists first
+                let alias_table_exists = self.db.run_script(
+                    "::columns entity_alias",
+                    BTreeMap::new(),
+                    ScriptMutability::Immutable,
+                ).is_ok();
+                
+                if alias_table_exists {
+                    // Migrate any non-empty aliases from old column to new table
+                    let _ = self.db.run_script(
+                        r#"?[entity_id, alias_lower, alias] := 
+                            *entity{id: entity_id, aliases},
+                            alias in aliases,
+                            alias != "",
+                            alias_lower = lowercase(alias)
+                        :put entity_alias { entity_id, alias_lower => alias }"#,
+                        BTreeMap::new(),
+                        ScriptMutability::Mutable,
+                    );
+                }
+                // Note: We leave the old aliases column in place (Cozo doesn't support column removal)
+                // It will just be ignored going forward
             }
         }
 
@@ -355,6 +395,7 @@ impl KnowledgeGraph {
     // ────────────────────────────────────────────────────────────
 
     /// Store a single entity. Generates UUID if id is empty.
+    /// Also stores any aliases to the entity_alias table.
     pub fn store_entity(&self, mut entity: Entity) -> Result<()> {
         if entity.id.is_empty() {
             entity.id = uuid::Uuid::new_v4().to_string();
@@ -366,28 +407,64 @@ impl KnowledgeGraph {
             entity.updated_at = entity.created_at;
         }
 
-        let aliases_dv = DataValue::List(
-            entity.aliases.iter().map(|s| DataValue::Str(s.clone().into())).collect()
-        );
+        let name_lower = entity.name.to_lowercase();
 
         let mut params = BTreeMap::new();
-        params.insert("id".to_string(), DataValue::Str(entity.id.into()));
+        params.insert("id".to_string(), DataValue::Str(entity.id.clone().into()));
         params.insert("entity_type".to_string(), DataValue::Str(entity.entity_type.into()));
         params.insert("name".to_string(), DataValue::Str(entity.name.into()));
+        params.insert("name_lower".to_string(), DataValue::Str(name_lower.into()));
         params.insert("properties".to_string(), json_to_datavalue(&entity.properties));
-        params.insert("aliases".to_string(), aliases_dv);
         params.insert("created_at".to_string(), DataValue::from(entity.created_at));
         params.insert("updated_at".to_string(), DataValue::from(entity.updated_at));
 
         self.run_mutating(
-            r#"?[id, entity_type, name, properties, aliases, created_at, updated_at] <- [
-                [$id, $entity_type, $name, $properties, $aliases, $created_at, $updated_at]
+            r#"?[id, entity_type, name, properties, name_lower, created_at, updated_at] <- [
+                [$id, $entity_type, $name, $properties, $name_lower, $created_at, $updated_at]
             ]
-            :put entity { id, entity_type, name => properties, aliases, created_at, updated_at }"#,
+            :put entity { id, entity_type, name => properties, name_lower, created_at, updated_at }"#,
+            params,
+        )?;
+
+        // Store aliases in separate table
+        for alias in &entity.aliases {
+            if !alias.is_empty() {
+                self.store_alias(&entity.id, alias)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add an alias for an entity.
+    pub fn store_alias(&self, entity_id: &str, alias: &str) -> Result<()> {
+        let alias_lower = alias.to_lowercase();
+        
+        let mut params = BTreeMap::new();
+        params.insert("entity_id".to_string(), DataValue::Str(entity_id.into()));
+        params.insert("alias".to_string(), DataValue::Str(alias.into()));
+        params.insert("alias_lower".to_string(), DataValue::Str(alias_lower.into()));
+
+        self.run_mutating(
+            r#"?[entity_id, alias_lower, alias] <- [[$entity_id, $alias_lower, $alias]]
+            :put entity_alias { entity_id, alias_lower => alias }"#,
             params,
         )?;
 
         Ok(())
+    }
+
+    /// Get all aliases for an entity.
+    pub fn get_aliases(&self, entity_id: &str) -> Result<Vec<String>> {
+        let mut params = BTreeMap::new();
+        params.insert("entity_id".to_string(), DataValue::Str(entity_id.into()));
+
+        let result = self.run_query(
+            r#"?[alias] := *entity_alias{entity_id, alias}, entity_id == $entity_id"#,
+            params,
+        )?;
+
+        Ok(result.rows.iter().map(|row| dv_to_string(&row[0])).collect())
     }
 
     /// Store multiple entities.
@@ -442,59 +519,41 @@ impl KnowledgeGraph {
     // Queries
     // ────────────────────────────────────────────────────────────
 
-    /// Find an entity by name: exact match first, then case-insensitive.
+    /// Find an entity by name or alias (case-insensitive, indexed).
     pub fn find_entity_by_name(&self, name: &str) -> Result<Option<Entity>> {
+        let name_lower = name.to_lowercase();
         let mut params = BTreeMap::new();
-        params.insert("name".to_string(), DataValue::Str(name.into()));
-        params.insert("name_lower".to_string(), DataValue::Str(name.to_lowercase().into()));
+        params.insert("name_lower".to_string(), DataValue::Str(name_lower.into()));
 
-        // 1. Exact match on name
+        // 1. Search by name_lower (indexed)
         let result = self.run_query(
-            r#"?[id, entity_type, name, properties, aliases, created_at, updated_at] :=
-                *entity{id, entity_type, name, properties, aliases, created_at, updated_at},
-                name == $name"#,
+            r#"?[id, entity_type, name, properties, name_lower, created_at, updated_at] :=
+                *entity{id, entity_type, name, properties, name_lower, created_at, updated_at},
+                name_lower == $name_lower"#,
             params.clone(),
         )?;
 
-        if let Some(entity) = Self::rows_to_entities(&result).into_iter().next() {
+        if let Some(mut entity) = Self::rows_to_entities(&result).into_iter().next() {
+            entity.aliases = self.get_aliases(&entity.id)?;
             return Ok(Some(entity));
         }
 
-        // 2. Case-insensitive match on name
+        // 2. Search by alias_lower (indexed via entity_alias table)
         let result = self.run_query(
-            r#"?[id, entity_type, name, properties, aliases, created_at, updated_at] :=
-                *entity{id, entity_type, name, properties, aliases, created_at, updated_at},
-                lowercase(name) == $name_lower"#,
-            params.clone(),
-        )?;
-
-        if let Some(entity) = Self::rows_to_entities(&result).into_iter().next() {
-            return Ok(Some(entity));
-        }
-
-        // 3. Check aliases (exact)
-        let result = self.run_query(
-            r#"?[id, entity_type, name, properties, aliases, created_at, updated_at] :=
-                *entity{id, entity_type, name, properties, aliases, created_at, updated_at},
-                alias in aliases,
-                alias == $name"#,
-            params.clone(),
-        )?;
-
-        if let Some(entity) = Self::rows_to_entities(&result).into_iter().next() {
-            return Ok(Some(entity));
-        }
-
-        // 4. Check aliases (case-insensitive)
-        let result = self.run_query(
-            r#"?[id, entity_type, name, properties, aliases, created_at, updated_at] :=
-                *entity{id, entity_type, name, properties, aliases, created_at, updated_at},
-                alias in aliases,
-                lowercase(alias) == $name_lower"#,
+            r#"?[id, entity_type, name, properties, name_lower, created_at, updated_at] :=
+                *entity_alias{entity_id, alias_lower},
+                alias_lower == $name_lower,
+                *entity{id: entity_id, entity_type, name, properties, name_lower, created_at, updated_at},
+                id = entity_id"#,
             params,
         )?;
 
-        Ok(Self::rows_to_entities(&result).into_iter().next())
+        if let Some(mut entity) = Self::rows_to_entities(&result).into_iter().next() {
+            entity.aliases = self.get_aliases(&entity.id)?;
+            return Ok(Some(entity));
+        }
+
+        Ok(None)
     }
 
     /// Get entities related to a given entity (1-2 hops via relationships).
@@ -509,13 +568,13 @@ impl KnowledgeGraph {
 
         // 1-hop: direct relationships
         let result = self.run_query(
-            r#"?[other_id, other_type, other_name, other_props, other_aliases, other_created, other_updated, rel_type, direction] :=
+            r#"?[other_id, other_type, other_name, other_props, other_name_lower, other_created, other_updated, rel_type, direction] :=
                 *relationship{from_id: $eid, rel_type, to_id: other_id},
-                *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, aliases: other_aliases, created_at: other_created, updated_at: other_updated},
+                *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, name_lower: other_name_lower, created_at: other_created, updated_at: other_updated},
                 direction = "->"
-            ?[other_id, other_type, other_name, other_props, other_aliases, other_created, other_updated, rel_type, direction] :=
+            ?[other_id, other_type, other_name, other_props, other_name_lower, other_created, other_updated, rel_type, direction] :=
                 *relationship{from_id: other_id, rel_type, to_id: $eid},
-                *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, aliases: other_aliases, created_at: other_created, updated_at: other_updated},
+                *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, name_lower: other_name_lower, created_at: other_created, updated_at: other_updated},
                 direction = "<-""#,
             params.clone(),
         )?;
@@ -528,7 +587,7 @@ impl KnowledgeGraph {
                     entity_type: dv_to_string(&row[1]),
                     name: dv_to_string(&row[2]),
                     properties: dv_to_json(&row[3]),
-                    aliases: dv_to_string_vec(&row[4]),
+                    aliases: Vec::new(), // Load separately if needed
                     created_at: dv_to_f64(&row[5]),
                     updated_at: dv_to_f64(&row[6]),
                 };
@@ -553,17 +612,17 @@ impl KnowledgeGraph {
 
             let result2 = self.run_query(
                 r#"hop1[hop1_id] := hop1_id in $hop1_ids
-                ?[other_id, other_type, other_name, other_props, other_aliases, other_created, other_updated, rel_type, direction] :=
+                ?[other_id, other_type, other_name, other_props, other_name_lower, other_created, other_updated, rel_type, direction] :=
                     hop1[hop1_id],
                     *relationship{from_id: hop1_id, rel_type, to_id: other_id},
-                    *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, aliases: other_aliases, created_at: other_created, updated_at: other_updated},
+                    *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, name_lower: other_name_lower, created_at: other_created, updated_at: other_updated},
                     other_id != $eid,
                     not hop1[other_id],
                     direction = "->"
-                ?[other_id, other_type, other_name, other_props, other_aliases, other_created, other_updated, rel_type, direction] :=
+                ?[other_id, other_type, other_name, other_props, other_name_lower, other_created, other_updated, rel_type, direction] :=
                     hop1[hop1_id],
                     *relationship{from_id: other_id, rel_type, to_id: hop1_id},
-                    *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, aliases: other_aliases, created_at: other_created, updated_at: other_updated},
+                    *entity{id: other_id, entity_type: other_type, name: other_name, properties: other_props, name_lower: other_name_lower, created_at: other_created, updated_at: other_updated},
                     other_id != $eid,
                     not hop1[other_id],
                     direction = "<-""#,
@@ -577,7 +636,7 @@ impl KnowledgeGraph {
                         entity_type: dv_to_string(&row[1]),
                         name: dv_to_string(&row[2]),
                         properties: dv_to_json(&row[3]),
-                        aliases: dv_to_string_vec(&row[4]),
+                        aliases: Vec::new(), // Load separately if needed
                         created_at: dv_to_f64(&row[5]),
                         updated_at: dv_to_f64(&row[6]),
                     };
@@ -976,6 +1035,9 @@ impl KnowledgeGraph {
         result.rows.get(row).and_then(|r| r.get(col)).and_then(|v| v.get_int())
     }
 
+    /// Convert query rows to Entity structs.
+    /// Expected columns: id, entity_type, name, properties, name_lower, created_at, updated_at
+    /// Note: aliases are NOT included in query results; use get_aliases() to load them separately.
     fn rows_to_entities(result: &NamedRows) -> Vec<Entity> {
         let mut entities = Vec::new();
         for row in &result.rows {
@@ -985,7 +1047,7 @@ impl KnowledgeGraph {
                     entity_type: dv_to_string(&row[1]),
                     name: dv_to_string(&row[2]),
                     properties: dv_to_json(&row[3]),
-                    aliases: dv_to_string_vec(&row[4]),
+                    aliases: Vec::new(), // Load via get_aliases() if needed
                     created_at: dv_to_f64(&row[5]),
                     updated_at: dv_to_f64(&row[6]),
                 });

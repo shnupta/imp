@@ -649,9 +649,9 @@ impl KnowledgeGraph {
 
         let chunks = Self::rows_to_chunks(&result);
 
-        // Update access counts
+        // Update access counts (best-effort, don't fail search on tracking errors)
         for chunk in &chunks {
-            self.increment_access_count(&chunk.id)?;
+            let _ = self.increment_access_count(&chunk.id);
         }
 
         Ok(chunks)
@@ -688,9 +688,9 @@ impl KnowledgeGraph {
             .filter_map(|r| all_chunks.get(r.document.id as usize).cloned())
             .collect();
 
-        // Update access counts for matched chunks
+        // Update access counts (best-effort, don't fail search on tracking errors)
         for chunk in &matched_chunks {
-            self.increment_access_count(&chunk.id)?;
+            let _ = self.increment_access_count(&chunk.id);
         }
 
         Ok(matched_chunks)

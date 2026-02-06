@@ -33,6 +33,7 @@ fn extract_readable_text(content_json: &str) -> String {
 pub struct SessionInfo {
     pub id: String,
     pub project: Option<String>,
+    pub workdir: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub title: Option<String>,
@@ -57,6 +58,7 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 project TEXT,
+                workdir TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 title TEXT,
@@ -78,13 +80,13 @@ impl Database {
     }
 
     /// Create a new session row and return its UUID.
-    pub fn create_session(&self, project: Option<&str>) -> Result<String> {
+    pub fn create_session(&self, project: Option<&str>, workdir: Option<&str>) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO sessions (id, project, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                params![id, project, now, now],
+                "INSERT INTO sessions (id, project, workdir, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, project, workdir, now, now],
             )
             .map_err(|e| ImpError::Database(e.to_string()))?;
         Ok(id)
@@ -147,7 +149,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, project, created_at, updated_at, title, message_count \
+                "SELECT id, project, workdir, created_at, updated_at, title, message_count \
                  FROM sessions ORDER BY updated_at DESC LIMIT ?1",
             )
             .map_err(|e| ImpError::Database(e.to_string()))?;
@@ -157,10 +159,11 @@ impl Database {
                 Ok(SessionInfo {
                     id: row.get(0)?,
                     project: row.get(1)?,
-                    created_at: row.get(2)?,
-                    updated_at: row.get(3)?,
-                    title: row.get(4)?,
-                    message_count: row.get(5)?,
+                    workdir: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    title: row.get(5)?,
+                    message_count: row.get(6)?,
                 })
             })
             .map_err(|e| ImpError::Database(e.to_string()))?;
@@ -179,7 +182,7 @@ impl Database {
                 let mut stmt = self
                     .conn
                     .prepare(
-                        "SELECT id, project, created_at, updated_at, title, message_count \
+                        "SELECT id, project, workdir, created_at, updated_at, title, message_count \
                          FROM sessions WHERE project = ?1 \
                          AND project NOT LIKE 'subagent-%' \
                          ORDER BY updated_at DESC LIMIT 1",
@@ -191,10 +194,11 @@ impl Database {
                         Ok(SessionInfo {
                             id: row.get(0)?,
                             project: row.get(1)?,
-                            created_at: row.get(2)?,
-                            updated_at: row.get(3)?,
-                            title: row.get(4)?,
-                            message_count: row.get(5)?,
+                            workdir: row.get(2)?,
+                            created_at: row.get(3)?,
+                            updated_at: row.get(4)?,
+                            title: row.get(5)?,
+                            message_count: row.get(6)?,
                         })
                     })
                     .map_err(|e| ImpError::Database(e.to_string()))?;
@@ -208,7 +212,7 @@ impl Database {
                 let mut stmt = self
                     .conn
                     .prepare(
-                        "SELECT id, project, created_at, updated_at, title, message_count \
+                        "SELECT id, project, workdir, created_at, updated_at, title, message_count \
                          FROM sessions WHERE project IS NULL \
                          OR project NOT LIKE 'subagent-%' \
                          ORDER BY updated_at DESC LIMIT 1",
@@ -220,10 +224,11 @@ impl Database {
                         Ok(SessionInfo {
                             id: row.get(0)?,
                             project: row.get(1)?,
-                            created_at: row.get(2)?,
-                            updated_at: row.get(3)?,
-                            title: row.get(4)?,
-                            message_count: row.get(5)?,
+                            workdir: row.get(2)?,
+                            created_at: row.get(3)?,
+                            updated_at: row.get(4)?,
+                            title: row.get(5)?,
+                            message_count: row.get(6)?,
                         })
                     })
                     .map_err(|e| ImpError::Database(e.to_string()))?;
@@ -247,7 +252,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, project, created_at, updated_at, title, message_count \
+                "SELECT id, project, workdir, created_at, updated_at, title, message_count \
                  FROM sessions WHERE project = ?1 AND id != ?2 AND message_count > 0 \
                  ORDER BY updated_at DESC LIMIT ?3",
             )
@@ -258,10 +263,11 @@ impl Database {
                 Ok(SessionInfo {
                     id: row.get(0)?,
                     project: row.get(1)?,
-                    created_at: row.get(2)?,
-                    updated_at: row.get(3)?,
-                    title: row.get(4)?,
-                    message_count: row.get(5)?,
+                    workdir: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    title: row.get(5)?,
+                    message_count: row.get(6)?,
                 })
             })
             .map_err(|e| ImpError::Database(e.to_string()))?;
@@ -351,10 +357,10 @@ impl Database {
     }
 
     /// List sessions created/updated on a specific date.
-    /// Returns (session_id, project, created_at) tuples.
-    pub fn list_sessions_for_date(&self, date: &str) -> Result<Vec<(String, Option<String>, String)>> {
+    /// Returns (session_id, project, workdir, created_at) tuples.
+    pub fn list_sessions_for_date(&self, date: &str) -> Result<Vec<(String, Option<String>, Option<String>, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project, created_at FROM sessions \
+            "SELECT id, project, workdir, created_at FROM sessions \
              WHERE date(created_at) = ?1 OR date(updated_at) = ?1 \
              ORDER BY updated_at DESC"
         ).map_err(|e| ImpError::Database(e.to_string()))?;
@@ -364,7 +370,8 @@ impl Database {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })
             .map_err(|e| ImpError::Database(e.to_string()))?;
@@ -379,7 +386,7 @@ impl Database {
     /// Get a session by its ID.
     pub fn get_session_by_id(&self, session_id: &str) -> Result<Option<SessionInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project, created_at, updated_at, title, message_count \
+            "SELECT id, project, workdir, created_at, updated_at, title, message_count \
              FROM sessions WHERE id = ?1"
         ).map_err(|e| ImpError::Database(e.to_string()))?;
 
@@ -387,10 +394,11 @@ impl Database {
             Ok(SessionInfo {
                 id: row.get(0)?,
                 project: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
-                title: row.get(4)?,
-                message_count: row.get(5)?,
+                workdir: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                title: row.get(5)?,
+                message_count: row.get(6)?,
             })
         });
 

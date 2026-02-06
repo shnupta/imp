@@ -19,6 +19,7 @@ use crate::tmux::{self, AgentStatus};
 struct SessionInfo {
     id: String,
     project: Option<String>,
+    workdir: Option<String>,
     preview: String,
     pane: Option<String>,
     pid: Option<u32>,
@@ -33,7 +34,6 @@ struct App {
     active_tab: usize, // 0 = Active, 1 = History
     list_state: ListState,
     should_quit: bool,
-    jump_to_pane: Option<String>,
 }
 
 impl App {
@@ -43,7 +43,6 @@ impl App {
             active_tab: 0,
             list_state: ListState::default(),
             should_quit: false,
-            jump_to_pane: None,
         };
         app.refresh_sessions()?;
         if !app.filtered_sessions().is_empty() {
@@ -71,17 +70,17 @@ impl App {
         
         let mut all_sessions = db_sessions;
         for sid in &active_session_ids {
-            if !all_sessions.iter().any(|(id, _, _)| id == sid) {
+            if !all_sessions.iter().any(|(id, _, _, _)| id == sid) {
                 // Fetch this session from DB
                 if let Ok(Some(info)) = db.get_session_by_id(sid) {
-                    all_sessions.push((info.id, info.project, info.created_at));
+                    all_sessions.push((info.id, info.project, info.workdir, info.created_at));
                 }
             }
         }
         
         self.sessions = all_sessions
             .into_iter()
-            .map(|(id, project, created_at)| {
+            .map(|(id, project, workdir, created_at)| {
                 // Find pane info for this session
                 let pane_info = panes.iter().find(|p| p.session_id == id);
                 let (pid, pane, is_active, status) = match pane_info {
@@ -103,15 +102,21 @@ impl App {
                     preview
                 };
                 
+                // Convert UTC timestamp to local time for display
+                let local_time = chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
+                    .unwrap_or_else(|_| created_at.clone());
+
                 SessionInfo {
                     id,
                     project,
+                    workdir,
                     preview,
                     pane,
                     pid,
                     is_active,
                     status,
-                    created_at,
+                    created_at: local_time,
                 }
             })
             .collect();
@@ -173,8 +178,8 @@ impl App {
             if let Some(session) = sessions.get(i) {
                 if let Some(ref pane) = session.pane {
                     if session.is_active {
-                        self.jump_to_pane = Some(pane.clone());
-                        self.should_quit = true;
+                        // Switch to the pane without closing TUI
+                        let _ = tmux::switch_to_pane(pane);
                     }
                 }
             }
@@ -204,7 +209,13 @@ fn ui(frame: &mut Frame, app: &mut App) {
     let items: Vec<ListItem> = sessions
         .iter()
         .map(|s| {
-            let project = s.project.as_deref().unwrap_or("(no project)");
+            // Show project name, or directory name if no project
+            let project = s.project.as_deref().unwrap_or_else(|| {
+                s.workdir.as_deref()
+                    .and_then(|p| std::path::Path::new(p).file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("(no project)")
+            });
             let status_icon = if s.is_active {
                 match s.status {
                     AgentStatus::Working => "⚙",  // Working
@@ -280,12 +291,5 @@ pub fn run() -> Result<()> {
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
-    result?;
-
-    // Jump to pane if requested
-    if let Some(pane) = app.jump_to_pane {
-        tmux::switch_to_pane(&pane)?;
-    }
-
-    Ok(())
+    result
 }

@@ -95,7 +95,13 @@ impl Agent {
 
         // Open SQLite database and create a new session
         let db = Database::open()?;
-        let session_id = db.create_session(project_info.as_ref().map(|p| p.name.as_str()))?;
+        let workdir = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from));
+        let session_id = db.create_session(
+            project_info.as_ref().map(|p| p.name.as_str()),
+            workdir.as_deref(),
+        )?;
 
         // Register tmux pane for this session (for TUI manager)
         let _ = crate::tmux::register_pane(&session_id);

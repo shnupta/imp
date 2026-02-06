@@ -161,7 +161,13 @@ impl SubAgent {
         tools.load_subagent_builtins_with_mcp().await?;
 
         let db = Database::open()?;
-        let session_id = db.create_session(Some(&format!("subagent-{}", self.id)))?;
+        let workdir = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from));
+        let session_id = db.create_session(
+            Some(&format!("subagent-{}", self.id)),
+            workdir.as_deref(),
+        )?;
 
         // Load identity and user context so sub-agents share the parent's personality
         let identity_context = if let Ok(home) = imp_home() {

@@ -223,6 +223,9 @@ impl Agent {
     }
 
     async fn process_message_with_options(&mut self, user_message: &str, stream: bool, render_markdown: bool) -> Result<String> {
+        // Set status to working
+        let _ = crate::tmux::set_status(&self.session_id, crate::tmux::AgentStatus::Working);
+        
         // Repair any orphaned tool_use blocks from a previous interrupt
         self.repair_orphaned_tool_use();
 
@@ -263,6 +266,7 @@ impl Agent {
         loop {
             // Check for interrupt before each iteration
             if self.is_interrupted() {
+                let _ = crate::tmux::set_status(&self.session_id, crate::tmux::AgentStatus::Idle);
                 return Err(ImpError::Agent("interrupted".to_string()));
             }
 
@@ -309,7 +313,10 @@ impl Agent {
                         .send_message(self.messages.clone(), Some(system_prompt), retry_tools, stream)
                         .await?
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    let _ = crate::tmux::set_status(&self.session_id, crate::tmux::AgentStatus::Idle);
+                    return Err(e);
+                }
             };
 
             if show_thinking {
@@ -364,6 +371,7 @@ impl Agent {
                 }
                 // Distill structured insights from this turn
                 self.maybe_distill_insights(user_message, &text_content, turn_tool_count);
+                let _ = crate::tmux::set_status(&self.session_id, crate::tmux::AgentStatus::Idle);
                 return Ok(text_content);
             }
 
@@ -373,6 +381,7 @@ impl Agent {
             for tool_call in tool_calls {
                 // Check for interrupt between tool calls
                 if self.is_interrupted() {
+                    let _ = crate::tmux::set_status(&self.session_id, crate::tmux::AgentStatus::Idle);
                     return Err(ImpError::Agent("interrupted".to_string()));
                 }
 

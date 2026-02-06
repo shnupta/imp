@@ -13,7 +13,7 @@ use ratatui::{
 use std::io::{stdout, Stdout};
 
 use crate::db::Database;
-use crate::tmux;
+use crate::tmux::{self, AgentStatus};
 
 /// Session info for display
 struct SessionInfo {
@@ -23,6 +23,7 @@ struct SessionInfo {
     pane: Option<String>,
     pid: Option<u32>,
     is_active: bool,
+    status: AgentStatus,
     created_at: String,
 }
 
@@ -66,12 +67,12 @@ impl App {
             .map(|(id, project, created_at)| {
                 // Find pane info for this session
                 let pane_info = panes.iter().find(|p| p.session_id == id);
-                let (pid, pane, is_active) = match pane_info {
+                let (pid, pane, is_active, status) = match pane_info {
                     Some(info) => {
                         let alive = tmux::is_process_alive(info.pid);
-                        (Some(info.pid), Some(info.pane.clone()), alive)
+                        (Some(info.pid), Some(info.pane.clone()), alive, info.status)
                     }
-                    None => (None, None, false),
+                    None => (None, None, false, AgentStatus::Idle),
                 };
                 
                 // Get first user message as preview
@@ -92,6 +93,7 @@ impl App {
                     pane,
                     pid,
                     is_active,
+                    status,
                     created_at,
                 }
             })
@@ -186,11 +188,18 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .iter()
         .map(|s| {
             let project = s.project.as_deref().unwrap_or("(no project)");
-            let status = if s.is_active { "●" } else { "○" };
+            let status_icon = if s.is_active {
+                match s.status {
+                    AgentStatus::Working => "⚙",  // Working
+                    AgentStatus::Idle => "●",     // Idle/waiting
+                }
+            } else {
+                "○"  // Not active
+            };
             let pane = s.pane.as_deref().unwrap_or("-");
             let line = format!(
                 "{} {} [{}] {} | {}",
-                status, s.created_at, pane, project, s.preview
+                status_icon, s.created_at, pane, project, s.preview
             );
             ListItem::new(line)
         })

@@ -38,8 +38,32 @@ pub fn register_pane(session_id: &str) -> anyhow::Result<()> {
     // Use first 8 chars of UUID for filename (avoid filesystem issues)
     let short_id = &session_id[..8.min(session_id.len())];
     let path = panes_dir()?.join(format!("{}.pane", short_id));
-    let content = format!("{}\n{}\n{}", pid, pane, session_id);
+    let content = format!("{}\n{}\n{}\nidle", pid, pane, session_id);
     fs::write(path, content)?;
+    Ok(())
+}
+
+/// Update the status for a session
+pub fn set_status(session_id: &str, status: AgentStatus) -> anyhow::Result<()> {
+    let short_id = &session_id[..8.min(session_id.len())];
+    let path = panes_dir()?.join(format!("{}.pane", short_id));
+    
+    if !path.exists() {
+        return Ok(()); // Not registered (not in tmux)
+    }
+    
+    let content = fs::read_to_string(&path)?;
+    let mut lines: Vec<&str> = content.lines().collect();
+    
+    // Ensure we have at least 4 lines
+    while lines.len() < 4 {
+        lines.push("idle");
+    }
+    
+    // Update status (4th line)
+    let new_content = format!("{}\n{}\n{}\n{}", 
+        lines[0], lines[1], lines[2], status.as_str());
+    fs::write(path, new_content)?;
     Ok(())
 }
 
@@ -53,15 +77,18 @@ pub fn unregister_pane(session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Get pane info for a session (pid, pane_id)
-pub fn get_pane_info_by_short_id(short_id: &str) -> Option<(u32, String, String)> {
+/// Get pane info for a session (pid, pane_id, full_session_id, status)
+pub fn get_pane_info_by_short_id(short_id: &str) -> Option<(u32, String, String, AgentStatus)> {
     let path = panes_dir().ok()?.join(format!("{}.pane", short_id));
     let content = fs::read_to_string(path).ok()?;
     let mut lines = content.lines();
     let pid: u32 = lines.next()?.parse().ok()?;
     let pane = lines.next()?.to_string();
     let full_id = lines.next()?.to_string();
-    Some((pid, pane, full_id))
+    let status = lines.next()
+        .map(AgentStatus::from_str)
+        .unwrap_or(AgentStatus::Idle);
+    Some((pid, pane, full_id, status))
 }
 
 /// Check if a process is still running
@@ -92,11 +119,35 @@ pub fn switch_to_pane(pane_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Agent status
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStatus {
+    Idle,      // Waiting for user input
+    Working,   // Processing a message
+}
+
+impl AgentStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentStatus::Idle => "idle",
+            AgentStatus::Working => "working",
+        }
+    }
+    
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "working" => AgentStatus::Working,
+            _ => AgentStatus::Idle,
+        }
+    }
+}
+
 /// Pane registration info
 pub struct PaneInfo {
     pub session_id: String,
     pub pid: u32,
     pub pane: String,
+    pub status: AgentStatus,
 }
 
 /// List all registered panes
@@ -112,11 +163,12 @@ pub fn list_registered_panes() -> Vec<PaneInfo> {
             let path = entry.path();
             if path.extension().map(|e| e == "pane").unwrap_or(false) {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if let Some((pid, pane, full_id)) = get_pane_info_by_short_id(stem) {
+                    if let Some((pid, pane, full_id, status)) = get_pane_info_by_short_id(stem) {
                         result.push(PaneInfo {
                             session_id: full_id,
                             pid,
                             pane,
+                            status,
                         });
                     }
                 }

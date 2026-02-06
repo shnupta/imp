@@ -99,7 +99,15 @@ pub fn is_process_alive(pid: u32) -> bool {
 /// Switch to a tmux pane
 pub fn switch_to_pane(pane_id: &str) -> anyhow::Result<()> {
     // pane_id format: "session:window.pane"
-    // Use select-window first to switch to the window, then select-pane
+    // Extract session name for switch-client
+    let session = pane_id.split(':').next().unwrap_or(pane_id);
+    
+    // Switch client to the target session (needed for cross-session jumps)
+    Command::new("tmux")
+        .args(["switch-client", "-t", session])
+        .output()?;
+    
+    // Select the specific window and pane
     Command::new("tmux")
         .args(["select-window", "-t", pane_id])
         .output()?;

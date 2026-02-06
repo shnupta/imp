@@ -98,22 +98,14 @@ pub fn is_process_alive(pid: u32) -> bool {
 
 /// Switch to a tmux pane
 pub fn switch_to_pane(pane_id: &str) -> anyhow::Result<()> {
-    // Parse pane_id: "session:window.pane"
-    let parts: Vec<&str> = pane_id.split(':').collect();
-    if parts.len() != 2 {
-        anyhow::bail!("Invalid pane_id format: {}", pane_id);
-    }
-    let session = parts[0];
-    let window_pane = parts[1];
-    
-    // Switch to session
+    // pane_id format: "session:window.pane"
+    // Use select-window first to switch to the window, then select-pane
     Command::new("tmux")
-        .args(["switch-client", "-t", session])
+        .args(["select-window", "-t", pane_id])
         .output()?;
     
-    // Select window.pane
     Command::new("tmux")
-        .args(["select-pane", "-t", &format!("{}:{}", session, window_pane)])
+        .args(["select-pane", "-t", pane_id])
         .output()?;
     
     Ok(())

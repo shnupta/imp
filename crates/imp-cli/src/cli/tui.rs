@@ -78,6 +78,9 @@ impl App {
             }
         }
         
+        // Sort by created_at descending (newest first)
+        all_sessions.sort_by(|a, b| b.3.cmp(&a.3));
+        
         self.sessions = all_sessions
             .into_iter()
             .map(|(id, project, workdir, created_at)| {

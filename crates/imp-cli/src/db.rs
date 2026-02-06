@@ -365,7 +365,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT id, project, workdir, created_at FROM sessions \
              WHERE date(created_at) = ?1 OR date(updated_at) = ?1 \
-             ORDER BY updated_at DESC"
+             ORDER BY created_at DESC"
         ).map_err(|e| ImpError::Database(e.to_string()))?;
 
         let rows = stmt

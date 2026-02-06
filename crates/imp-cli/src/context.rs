@@ -317,11 +317,15 @@ fn load_md_summary(
     if let Ok(content) = fs::read_to_string(&path) {
         let trimmed = content.trim();
         if !trimmed.is_empty() && has_meaningful_content(trimmed) {
-            let summary = if trimmed.len() > max_chars {
-                // Try to cut at a word boundary
-                let cut = &trimmed[..max_chars];
+            let summary = if trimmed.chars().count() > max_chars {
+                // Try to cut at a word boundary (using char indices for safety)
+                let end_byte: usize = trimmed.char_indices()
+                    .nth(max_chars)
+                    .map(|(i, _)| i)
+                    .unwrap_or(trimmed.len());
+                let cut = &trimmed[..end_byte];
                 match cut.rfind(char::is_whitespace) {
-                    Some(pos) if pos > max_chars / 2 => format!("{}…", &trimmed[..pos]),
+                    Some(pos) if pos > end_byte / 2 => format!("{}…", &trimmed[..pos]),
                     _ => format!("{}…", cut),
                 }
             } else {

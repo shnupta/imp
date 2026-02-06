@@ -57,7 +57,11 @@ fn create_summary_message(messages_to_summarize: &[Message]) -> String {
         let role = &msg.role;
         let content_preview = match &msg.content {
             Value::String(s) => {
-                if s.len() > 200 { format!("{}...", &s[..200]) } else { s.clone() }
+                if s.chars().count() > 200 {
+                    format!("{}...", s.chars().take(200).collect::<String>())
+                } else {
+                    s.clone()
+                }
             }
             Value::Array(blocks) => {
                 let mut texts = Vec::new();
@@ -66,7 +70,11 @@ fn create_summary_message(messages_to_summarize: &[Message]) -> String {
                         match t {
                             "text" => {
                                 if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                    let preview = if text.len() > 150 { format!("{}...", &text[..150]) } else { text.to_string() };
+                                    let preview = if text.chars().count() > 150 {
+                                        format!("{}...", text.chars().take(150).collect::<String>())
+                                    } else {
+                                        text.to_string()
+                                    };
                                     texts.push(preview);
                                 }
                             }

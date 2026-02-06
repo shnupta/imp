@@ -183,8 +183,9 @@ fn extract_readme_description(root: &Path) -> Option<String> {
                 // Skip empty lines and markdown headers
                 if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("<!--") {
                     // Return first meaningful line, truncated if too long
-                    if trimmed.len() > 120 {
-                        return Some(format!("{}…", &trimmed[..117]));
+                    if trimmed.chars().count() > 120 {
+                        let truncated: String = trimmed.chars().take(117).collect();
+                        return Some(format!("{}…", truncated));
                     } else {
                         return Some(trimmed.to_string());
                     }

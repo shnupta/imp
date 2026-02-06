@@ -376,6 +376,31 @@ impl Database {
         Ok(result)
     }
 
+    /// Get a session by its ID.
+    pub fn get_session_by_id(&self, session_id: &str) -> Result<Option<SessionInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project, created_at, updated_at, title, message_count \
+             FROM sessions WHERE id = ?1"
+        ).map_err(|e| ImpError::Database(e.to_string()))?;
+
+        let result = stmt.query_row(params![session_id], |row| {
+            Ok(SessionInfo {
+                id: row.get(0)?,
+                project: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+                title: row.get(4)?,
+                message_count: row.get(5)?,
+            })
+        });
+
+        match result {
+            Ok(info) => Ok(Some(info)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(ImpError::Database(e.to_string())),
+        }
+    }
+
     /// Get the first user message for a session (for preview).
     pub fn get_first_user_message(&self, session_id: &str) -> Result<Option<String>> {
         let mut stmt = self.conn.prepare(

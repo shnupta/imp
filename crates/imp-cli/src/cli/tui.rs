@@ -54,15 +54,32 @@ impl App {
 
     fn refresh_sessions(&mut self) -> Result<()> {
         let db = Database::open()?;
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         
-        // Get today's sessions from DB
-        let db_sessions = db.list_sessions_for_date(&today)?;
-        
-        // Get registered panes
+        // Get registered panes first
         let panes = tmux::list_registered_panes();
         
-        self.sessions = db_sessions
+        // For active tab: get sessions that have registered panes (regardless of date)
+        // For history tab: get today's sessions
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let db_sessions = db.list_sessions_for_date(&today)?;
+        
+        // Also fetch sessions for any active panes not in today's list
+        let active_session_ids: Vec<String> = panes.iter()
+            .filter(|p| tmux::is_process_alive(p.pid))
+            .map(|p| p.session_id.clone())
+            .collect();
+        
+        let mut all_sessions = db_sessions;
+        for sid in &active_session_ids {
+            if !all_sessions.iter().any(|(id, _, _)| id == sid) {
+                // Fetch this session from DB
+                if let Ok(Some(info)) = db.get_session_by_id(sid) {
+                    all_sessions.push((info.id, info.project, info.created_at));
+                }
+            }
+        }
+        
+        self.sessions = all_sessions
             .into_iter()
             .map(|(id, project, created_at)| {
                 // Find pane info for this session

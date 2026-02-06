@@ -97,6 +97,9 @@ impl Agent {
         let db = Database::open()?;
         let session_id = db.create_session(project_info.as_ref().map(|p| p.name.as_str()))?;
 
+        // Register tmux pane for this session (for TUI manager)
+        let _ = crate::tmux::register_pane(&session_id);
+
         let mut usage = UsageTracker::new();
         usage.set_model(&config.llm.model);
 
@@ -499,15 +502,23 @@ impl Agent {
 
     /// Resume a previous session: load its messages from the database.
     pub fn resume(&mut self, session_id: &str) -> Result<()> {
+        // Unregister old pane, register new one
+        let _ = crate::tmux::unregister_pane(&self.session_id);
         let messages = self.db.load_session_messages(session_id)?;
         self.messages = messages;
         self.session_id = session_id.to_string();
+        let _ = crate::tmux::register_pane(&self.session_id);
         Ok(())
     }
 
     /// Access the underlying database (for listing sessions, etc.).
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// Cleanup when the agent session ends (unregister tmux pane).
+    pub fn cleanup(&self) {
+        let _ = crate::tmux::unregister_pane(&self.session_id);
     }
 
     pub fn usage(&self) -> &UsageTracker {

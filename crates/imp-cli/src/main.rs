@@ -22,10 +22,11 @@ mod knowledge;
 mod logging;
 mod project;
 mod subagent;
+mod tmux;
 mod tools;
 mod usage;
 
-use cli::{bootstrap, chat, knowledge_cmd, learn, login, oneshot, project_cmd, reflect};
+use cli::{bootstrap, chat, knowledge_cmd, learn, login, oneshot, project_cmd, reflect, tui};
 
 #[derive(Parser)]
 #[command(name = "imp")]
@@ -84,6 +85,8 @@ enum Commands {
         #[command(subcommand)]
         command: KnowledgeCommands,
     },
+    /// TUI for managing multiple agent sessions
+    Tui,
 }
 
 #[derive(Subcommand)]
@@ -181,6 +184,9 @@ async fn main() -> Result<()> {
                 project_cmd::context()?;
             }
         },
+        Commands::Tui => {
+            tui::run()?;
+        }
     }
 
     Ok(())

@@ -6,3 +6,4 @@ pub mod login;
 pub mod oneshot;
 pub mod project_cmd;
 pub mod reflect;
+pub mod tui;

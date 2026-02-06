@@ -349,4 +349,48 @@ impl Database {
             .map_err(|e| ImpError::Database(e.to_string()))?;
         Ok(())
     }
+
+    /// List sessions created/updated on a specific date.
+    /// Returns (session_id, project, created_at) tuples.
+    pub fn list_sessions_for_date(&self, date: &str) -> Result<Vec<(String, Option<String>, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project, created_at FROM sessions \
+             WHERE date(created_at) = ?1 OR date(updated_at) = ?1 \
+             ORDER BY updated_at DESC"
+        ).map_err(|e| ImpError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![date], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| ImpError::Database(e.to_string()))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| ImpError::Database(e.to_string()))?);
+        }
+        Ok(result)
+    }
+
+    /// Get the first user message for a session (for preview).
+    pub fn get_first_user_message(&self, session_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT content FROM messages \
+             WHERE session_id = ?1 AND role = 'user' \
+             ORDER BY id ASC LIMIT 1"
+        ).map_err(|e| ImpError::Database(e.to_string()))?;
+
+        let result: Option<String> = stmt
+            .query_row(params![session_id], |row| row.get(0))
+            .ok();
+
+        match result {
+            Some(content_json) => Ok(Some(extract_readable_text(&content_json))),
+            None => Ok(None),
+        }
+    }
 }

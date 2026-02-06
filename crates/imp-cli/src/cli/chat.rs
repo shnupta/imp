@@ -455,6 +455,7 @@ pub async fn run(resume: bool, continue_last: bool, session: Option<String>) -> 
 
     // Clean shutdown
     let _ = cmd_tx.send(InputCommand::Shutdown);
+    agent.cleanup();
     Ok(())
 }
 

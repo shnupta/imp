@@ -76,6 +76,9 @@ impl Database {
         )
         .map_err(|e| ImpError::Database(e.to_string()))?;
 
+        // Migration: add workdir column to existing databases
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN workdir TEXT", []);
+
         Ok(Self { conn })
     }
 

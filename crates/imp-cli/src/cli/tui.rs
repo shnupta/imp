@@ -25,7 +25,8 @@ struct SessionInfo {
     pid: Option<u32>,
     is_active: bool,
     status: AgentStatus,
-    created_at: String,
+    created_at: String,      // Display format (HH:MM)
+    created_at_raw: String,  // Original timestamp for sorting
 }
 
 /// App state
@@ -78,9 +79,6 @@ impl App {
             }
         }
         
-        // Sort by created_at descending (newest first)
-        all_sessions.sort_by(|a, b| b.3.cmp(&a.3));
-        
         self.sessions = all_sessions
             .into_iter()
             .map(|(id, project, workdir, created_at)| {
@@ -120,9 +118,13 @@ impl App {
                     is_active,
                     status,
                     created_at: local_time,
+                    created_at_raw: created_at,
                 }
             })
             .collect();
+        
+        // Sort by created_at descending (newest first)
+        self.sessions.sort_by(|a, b| b.created_at_raw.cmp(&a.created_at_raw));
         
         Ok(())
     }

@@ -125,29 +125,6 @@ impl ContextManager {
                     &format!("Code patterns and conventions — {}", proj.name),
                     &mut l2_manifest,
                 );
-                register_l2_file(
-                    &project_dir.join("HISTORY.md"),
-                    &format!("Project history — {}", proj.name),
-                    &mut l2_manifest,
-                );
-
-                // Project daily memory → L2
-                register_daily_memory_l2(
-                    &project_dir.join("memory"),
-                    &format!("Project memory — {}", proj.name),
-                    &mut l2_manifest,
-                );
-            }
-
-            // L2: Directory structure snapshot (pre-generated tree)
-            let tree = generate_directory_structure(project_path);
-            let tree_path = home.join("projects").join(&proj.name).join(".tree_cache");
-            if let Ok(()) = fs::write(&tree_path, &tree) {
-                register_l2_file(
-                    &tree_path,
-                    &format!("Directory structure — {}", proj.name),
-                    &mut l2_manifest,
-                );
             }
 
             // Git context → L2 (just note that it's available)
@@ -499,92 +476,5 @@ fn generate_git_context(project_path: &Path) -> Option<String> {
         None
     } else {
         Some(git_info.join(" | "))
-    }
-}
-
-/// Generate directory structure snapshot for L2 (on-demand)
-fn generate_directory_structure(project_path: &Path) -> String {
-    let mut entries = Vec::new();
-    
-    // Common directories to exclude from tree view
-    let exclude_dirs = [
-        ".git", "node_modules", "target", "dist", "build", ".next",
-        "__pycache__", ".pytest_cache", "venv", ".venv", "env", ".env",
-        ".cargo", ".rustc_info.json", "Cargo.lock", ".DS_Store",
-        ".idea", ".vscode", "coverage", ".coverage", "htmlcov",
-        "tmp", "temp", ".tmp", ".sass-cache", ".cache",
-    ];
-
-    fn collect_entries(
-        dir: &Path, 
-        prefix: &str, 
-        entries: &mut Vec<String>, 
-        depth: usize, 
-        exclude: &[&str],
-        max_entries: usize
-    ) {
-        if depth >= 3 || entries.len() >= max_entries {
-            return;
-        }
-
-        let read_dir = match fs::read_dir(dir) {
-            Ok(rd) => rd,
-            Err(_) => return,
-        };
-
-        let mut items: Vec<_> = read_dir
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                let file_name = entry.file_name();
-                let name = file_name.to_string_lossy();
-                !exclude.contains(&name.as_ref())
-            })
-            .collect();
-
-        // Sort directories first, then files
-        items.sort_by_key(|entry| {
-            let is_dir = entry.path().is_dir();
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy().to_string();
-            (!is_dir, name)
-        });
-
-        for (i, entry) in items.iter().enumerate() {
-            if entries.len() >= max_entries {
-                break;
-            }
-
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-            let is_last = i == items.len() - 1;
-            let tree_char = if is_last { "└── " } else { "├── " };
-            let next_prefix = if is_last { "    " } else { "│   " };
-
-            let path = entry.path();
-            if path.is_dir() {
-                entries.push(format!("{}{}{}/", prefix, tree_char, name));
-                collect_entries(
-                    &path,
-                    &format!("{}{}", prefix, next_prefix),
-                    entries,
-                    depth + 1,
-                    exclude,
-                    max_entries
-                );
-            } else {
-                entries.push(format!("{}{}{}", prefix, tree_char, name));
-            }
-        }
-    }
-
-    collect_entries(project_path, "", &mut entries, 0, &exclude_dirs, 100);
-
-    if entries.is_empty() {
-        "Directory structure not available".to_string()
-    } else {
-        if entries.len() >= 100 {
-            entries.push("... (truncated at 100 entries)".to_string());
-        }
-        entries.join("\n")
     }
 }

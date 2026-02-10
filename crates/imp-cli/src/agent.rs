@@ -256,12 +256,38 @@ impl Agent {
             user_message.to_string()
         };
 
-        self.messages.push(Message::text("user", &effective_message));
+        // Build user message with optional knowledge context as separate block
+        let knowledge_context = if self.knowledge_enabled {
+            crate::knowledge::KnowledgeGraph::open()
+                .ok()
+                .and_then(|kg| kg.retrieve_context(&effective_message, 5, 5).ok())
+                .filter(|ctx| !ctx.is_empty())
+        } else {
+            None
+        };
+        
+        let user_content = if let Some(ref knowledge) = knowledge_context {
+            // Use block array: [knowledge block, user message block]
+            json!([
+                {
+                    "type": "text",
+                    "text": format!("[Retrieved context]\n\n{}\n\n---", knowledge)
+                },
+                {
+                    "type": "text",
+                    "text": effective_message
+                }
+            ])
+        } else {
+            json!(effective_message)
+        };
+        
+        self.messages.push(Message::with_content("user", user_content.clone()));
         // Persist user message
         if let Err(e) = self.db.save_message(
             &self.session_id,
             "user",
-            &serde_json::Value::String(effective_message.clone()),
+            &user_content,
             0,
         ) {
             self.emit(style(format!("⚠ DB write failed: {}", e)).dim());
@@ -276,22 +302,8 @@ impl Agent {
                 return Err(ImpError::Agent("interrupted".to_string()));
             }
 
-            let mut system_prompt = self.context.assemble_system_prompt();
-            
-            // Retrieve and append relevant knowledge from knowledge graph
-            // (non-blocking — skipped if background init hasn't finished yet)
-            // Retrieve relevant knowledge (open KG briefly, then release lock)
-            if self.knowledge_enabled {
-                if let Ok(kg) = crate::knowledge::KnowledgeGraph::open() {
-                    if let Ok(context) = kg.retrieve_context(&effective_message, 5, 5) {
-                        if !context.is_empty() {
-                            system_prompt.push_str("\n\n---\n\n");
-                            system_prompt.push_str(&context);
-                        }
-                    }
-                }
-                // kg dropped here, releasing RocksDB lock
-            }
+            let system_prompt = self.context.assemble_system_prompt();
+            // Knowledge retrieval moved to user message blocks for better caching
             
             let system_tokens = system_prompt.len() / 4;
             let tools = Some(self.tools.get_tool_schemas().await);

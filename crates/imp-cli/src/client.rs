@@ -272,6 +272,38 @@ impl ClaudeClient {
             "max_tokens": max_tokens,
             "messages": messages,
         });
+        
+        // Add cache_control to the last assistant message's last content block
+        // This makes the conversation prefix cacheable
+        if let Some(messages_array) = request_body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+            // Find the last assistant message
+            if let Some(last_assistant) = messages_array.iter_mut().rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+            {
+                if let Some(content) = last_assistant.get_mut("content") {
+                    match content {
+                        Value::Array(blocks) => {
+                            // Add cache_control to the last block
+                            if let Some(last_block) = blocks.last_mut() {
+                                if let Value::Object(ref mut obj) = last_block {
+                                    obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
+                                }
+                            }
+                        }
+                        Value::String(_) => {
+                            // Convert string content to block array with cache_control
+                            let text = content.as_str().unwrap_or("").to_string();
+                            *content = json!([{
+                                "type": "text",
+                                "text": text,
+                                "cache_control": {"type": "ephemeral"}
+                            }]);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         // Add thinking configuration
         if use_thinking {

@@ -121,6 +121,8 @@ impl ToolRegistry {
         match mcp::load_mcp_config() {
             Ok(mcp_configs) if !mcp_configs.is_empty() => {
                 self.mcp_registry.load_from_config_background(&mcp_configs);
+                // Add discovery tools since we have MCP servers
+                self.add_mcp_discovery_tools();
             }
             Err(e) => warn!(error = %e, "Failed to read .mcp.json"),
             _ => {}
@@ -131,7 +133,7 @@ impl ToolRegistry {
 
     fn load_builtin_tools(&mut self) {
         // Add builtin tools (including agent management tools)
-        let builtins = vec![
+        let mut builtins = vec![
             self.create_exec_tool(),
             self.create_file_read_tool(),
             self.create_file_write_tool(),
@@ -145,8 +147,19 @@ impl ToolRegistry {
             self.create_search_knowledge_tool(),
             self.create_add_alias_tool(),
         ];
-
+        
         for tool in builtins {
+            self.tools.insert(tool.tool.name.clone(), tool);
+        }
+    }
+    
+    /// Add MCP discovery tools (called after MCP config is loaded)
+    fn add_mcp_discovery_tools(&mut self) {
+        let tools = vec![
+            self.create_list_mcp_servers_tool(),
+            self.create_enable_mcp_server_tool(),
+        ];
+        for tool in tools {
             self.tools.insert(tool.tool.name.clone(), tool);
         }
     }
@@ -180,6 +193,8 @@ impl ToolRegistry {
         match mcp::load_mcp_config() {
             Ok(mcp_configs) if !mcp_configs.is_empty() => {
                 self.mcp_registry.load_from_config_background(&mcp_configs);
+                // Add discovery tools since we have MCP servers
+                self.add_mcp_discovery_tools();
             }
             Err(e) => warn!(error = %e, "Failed to read .mcp.json"),
             _ => {}
@@ -293,7 +308,65 @@ impl ToolRegistry {
     }
 
     pub async fn execute_tool(&mut self, tool_call: &ToolCall) -> Result<ToolResult> {
-        // First check if it's a built-in or custom tool
+        // Handle MCP management tools specially (need mcp_registry access)
+        if tool_call.name == "list_mcp_servers" {
+            let servers = self.mcp_registry.list_available_servers().await;
+            if servers.is_empty() {
+                return Ok(ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    content: "No MCP servers configured.".to_string(),
+                    error: None,
+                });
+            }
+            
+            let mut output = String::from("Available MCP servers:\n\n");
+            for (server_name, tools) in servers {
+                output.push_str(&format!("## {}\n", server_name));
+                for (name, desc, params) in tools {
+                    let params_str = params.join(", ");
+                    let desc_short = if desc.len() > 60 {
+                        format!("{}...", desc.chars().take(60).collect::<String>())
+                    } else {
+                        desc
+                    };
+                    output.push_str(&format!("- {}({}) — {}\n", name, params_str, desc_short));
+                }
+                output.push('\n');
+            }
+            output.push_str("Use enable_mcp_server(name) to enable a server's tools.");
+            
+            return Ok(ToolResult {
+                tool_use_id: tool_call.id.clone(),
+                content: output,
+                error: None,
+            });
+        }
+        
+        if tool_call.name == "enable_mcp_server" {
+            let server_name = tool_call.arguments
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ImpError::Tool("Missing required parameter: name".to_string()))?;
+            
+            match self.mcp_registry.enable_server(server_name).await {
+                Ok(summary) => {
+                    return Ok(ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        content: summary,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    return Ok(ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        content: String::new(),
+                        error: Some(e.to_string()),
+                    });
+                }
+            }
+        }
+        
+        // Check if it's a built-in or custom tool
         if let Some(tool_def) = self.tools.get(&tool_call.name) {
             let result = match tool_def.handler.kind.as_str() {
                 "builtin" => {
@@ -769,6 +842,45 @@ impl ToolRegistry {
                         required: true,
                         default: None,
                         description: Some("The alias to add for the entity.".to_string()),
+                    });
+                    params
+                },
+            },
+            handler: ToolHandler {
+                kind: "builtin".to_string(),
+                command: None,
+                script: None,
+            },
+        }
+    }
+    
+    fn create_list_mcp_servers_tool(&self) -> ToolDefinition {
+        ToolDefinition {
+            tool: ToolMeta {
+                name: "list_mcp_servers".to_string(),
+                description: "List available MCP (Model Context Protocol) servers and their tools. MCP servers provide additional capabilities like GitHub integration, database access, etc. Use this to discover what external tools are available, then use enable_mcp_server to activate them.".to_string(),
+                parameters: HashMap::new(),
+            },
+            handler: ToolHandler {
+                kind: "builtin".to_string(),
+                command: None,
+                script: None,
+            },
+        }
+    }
+    
+    fn create_enable_mcp_server_tool(&self) -> ToolDefinition {
+        ToolDefinition {
+            tool: ToolMeta {
+                name: "enable_mcp_server".to_string(),
+                description: "Enable an MCP server, making its tools available for use. After enabling, the server's tools will be available in subsequent turns. Use list_mcp_servers first to see available servers.".to_string(),
+                parameters: {
+                    let mut params = HashMap::new();
+                    params.insert("name".to_string(), ParameterDef {
+                        param_type: "string".to_string(),
+                        required: true,
+                        default: None,
+                        description: Some("Name of the MCP server to enable (from list_mcp_servers output).".to_string()),
                     });
                     params
                 },

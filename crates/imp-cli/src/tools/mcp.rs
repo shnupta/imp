@@ -512,14 +512,21 @@ struct McpInitResult {
 }
 
 /// Manages all MCP server connections and routes tool calls.
-/// Supports background initialization — servers connect in parallel
-/// and their tools become available before the first LLM call.
+/// Supports background initialization — servers connect in parallel.
+/// Tools are lazy-loaded: servers connect at startup but their tools
+/// are only exposed to the LLM after explicitly enabled via `enable_server()`.
 pub struct McpRegistry {
     servers: Vec<McpServer>,
-    /// Maps tool name → index into servers vec
+    /// Maps tool name → index into servers vec (only for enabled servers)
     tool_routing: HashMap<String, usize>,
     /// Background init tasks that haven't been resolved yet
     pending: Vec<tokio::task::JoinHandle<Option<McpInitResult>>>,
+    /// All discovered tools per server (server_name → tools)
+    available_tools: HashMap<String, Vec<McpTool>>,
+    /// Set of enabled server names
+    enabled_servers: std::collections::HashSet<String>,
+    /// Maps server name → index into servers vec
+    server_indices: HashMap<String, usize>,
 }
 
 impl McpRegistry {
@@ -528,6 +535,9 @@ impl McpRegistry {
             servers: Vec::new(),
             tool_routing: HashMap::new(),
             pending: Vec::new(),
+            available_tools: HashMap::new(),
+            enabled_servers: std::collections::HashSet::new(),
+            server_indices: HashMap::new(),
         }
     }
 
@@ -601,22 +611,138 @@ impl McpRegistry {
         for result in results {
             if let Ok(Some(init)) = result {
                 let server_idx = self.servers.len();
-                for tool in &init.tools {
-                    self.tool_routing.insert(tool.name.clone(), server_idx);
-                }
+                let server_name = init.name.clone();
+                
+                // Store tools for later enabling (lazy loading)
+                self.available_tools.insert(server_name.clone(), init.tools);
+                self.server_indices.insert(server_name, server_idx);
                 self.servers.push(init.server);
             }
         }
     }
+    
+    /// List all available MCP servers and their tools (for discovery).
+    /// Returns (server_name, tool_count, [(tool_name, description, params)])
+    pub async fn list_available_servers(&mut self) -> Vec<(String, Vec<(String, String, Vec<String>)>)> {
+        self.resolve_pending().await;
+        
+        let mut result = Vec::new();
+        for (server_name, tools) in &self.available_tools {
+            let is_enabled = self.enabled_servers.contains(server_name);
+            let status = if is_enabled { " [enabled]" } else { "" };
+            
+            let tool_info: Vec<(String, String, Vec<String>)> = tools.iter().map(|t| {
+                // Extract parameter names from input_schema
+                let params: Vec<String> = t.input_schema
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .map(|obj| obj.keys().cloned().collect())
+                    .unwrap_or_default();
+                
+                let required: Vec<String> = t.input_schema
+                    .get("required")
+                    .and_then(|r| r.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                
+                // Mark optional params with ?
+                let param_strs: Vec<String> = params.iter().map(|p| {
+                    if required.contains(p) {
+                        p.clone()
+                    } else {
+                        format!("{}?", p)
+                    }
+                }).collect();
+                
+                (t.name.clone(), t.description.clone(), param_strs)
+            }).collect();
+            
+            result.push((format!("{}{}", server_name, status), tool_info));
+        }
+        
+        // Sort by server name for deterministic output
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
+    }
+    
+    /// Enable an MCP server, making its tools available to the LLM.
+    /// Returns a summary of enabled tools, or error if server not found.
+    pub async fn enable_server(&mut self, server_name: &str) -> Result<String> {
+        self.resolve_pending().await;
+        
+        // Check if already enabled
+        if self.enabled_servers.contains(server_name) {
+            return Ok(format!("Server '{}' is already enabled.", server_name));
+        }
+        
+        // Find the server
+        let server_idx = self.server_indices.get(server_name)
+            .ok_or_else(|| ImpError::Tool(format!(
+                "MCP server '{}' not found. Available: {}",
+                server_name,
+                self.available_tools.keys().cloned().collect::<Vec<_>>().join(", ")
+            )))?;
+        
+        let tools = self.available_tools.get(server_name)
+            .ok_or_else(|| ImpError::Tool(format!("No tools found for server '{}'", server_name)))?;
+        
+        // Add tools to routing
+        for tool in tools {
+            self.tool_routing.insert(tool.name.clone(), *server_idx);
+        }
+        
+        self.enabled_servers.insert(server_name.to_string());
+        
+        // Build summary
+        let mut summary = format!("Enabled: {} ({} tools)\n", server_name, tools.len());
+        for tool in tools {
+            let params: Vec<String> = tool.input_schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|obj| obj.keys().cloned().collect())
+                .unwrap_or_default();
+            
+            let required: Vec<String> = tool.input_schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            
+            let param_strs: Vec<String> = params.iter().map(|p| {
+                if required.contains(p) {
+                    p.clone()
+                } else {
+                    format!("{}?", p)
+                }
+            }).collect();
+            
+            let desc = if tool.description.len() > 60 {
+                format!("{}...", &tool.description.chars().take(60).collect::<String>())
+            } else {
+                tool.description.clone()
+            };
+            
+            summary.push_str(&format!("- {}({}) — {}\n", tool.name, param_strs.join(", "), desc));
+        }
+        
+        Ok(summary)
+    }
+    
+    /// Check if any MCP servers are available (for deciding whether to show discovery tools)
+    pub fn has_available_servers(&self) -> bool {
+        !self.available_tools.is_empty() || !self.pending.is_empty()
+    }
 
-    /// Get Anthropic-formatted tool schemas for all MCP tools.
+    /// Get Anthropic-formatted tool schemas for ENABLED MCP tools only.
     /// Resolves any pending background init tasks first.
     pub async fn get_tool_schemas(&mut self) -> Vec<Value> {
         self.resolve_pending().await;
 
         let mut schemas = Vec::new();
-        for server in &mut self.servers {
-            if let Ok(tools) = server.list_tools().await {
+        
+        // Only include tools from enabled servers
+        for server_name in &self.enabled_servers.clone() {
+            if let Some(tools) = self.available_tools.get(server_name) {
                 for tool in tools {
                     schemas.push(json!({
                         "name": tool.name,
@@ -626,6 +752,13 @@ impl McpRegistry {
                 }
             }
         }
+        
+        // Sort by tool name for deterministic ordering (prompt caching)
+        schemas.sort_by(|a, b| {
+            let name_a = a.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let name_b = b.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            name_a.cmp(name_b)
+        });
 
         schemas
     }

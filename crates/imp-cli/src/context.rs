@@ -12,7 +12,6 @@ use crate::project::ProjectInfo;
 use chrono::Local;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// Context manager with tiered loading.
 ///
@@ -92,11 +91,7 @@ impl ContextManager {
                 project_summary.push_str(&format!("\n**Config:** {}", proj.config_files.join(", ")));
             }
             
-            // Add git context to L1
-            let project_path = Path::new(&proj.path);
-            if let Some(git_context) = generate_git_context(project_path) {
-                project_summary.push_str(&format!("\n**Git:** {git_context}"));
-            }
+            // Git context available via exec tool — not injected to keep system prompt stable
 
             l1_sections.push(ContextSection {
                 heading: format!("Current Project — {}", proj.name),
@@ -127,8 +122,7 @@ impl ContextManager {
                 );
             }
 
-            // Git context → L2 (just note that it's available)
-            register_git_context_l2(project_path, &proj.name, &mut l2_manifest);
+            // Git context available via exec tool (git status, git log, etc.)
 
             // Auto-detect common AI coding assistant rules files
             let project_root = Path::new(&proj.path);
@@ -367,24 +361,6 @@ fn register_daily_memory_l2(
     }
 }
 
-/// Register git context availability in L2 (doesn't run git commands).
-fn register_git_context_l2(project_path: &Path, project_name: &str, manifest: &mut Vec<L2FileInfo>) {
-    // Just check if it's a git repo without running expensive commands
-    let git_dir = project_path.join(".git");
-    if git_dir.exists() {
-        manifest.push(L2FileInfo {
-            path: format!("(run: git -C {} log --oneline -10)", project_path.display()),
-            heading: format!("Git recent commits — {}", project_name),
-            size_hint: "run via exec".to_string(),
-        });
-        manifest.push(L2FileInfo {
-            path: format!("(run: git -C {} diff --stat)", project_path.display()),
-            heading: format!("Git current changes — {}", project_name),
-            size_hint: "run via exec".to_string(),
-        });
-    }
-}
-
 /// Check if content has meaningful text beyond just headings and HTML comments.
 fn has_meaningful_content(content: &str) -> bool {
     content.lines().any(|line| {
@@ -413,68 +389,5 @@ fn format_display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// Generate git context for L1 (always loaded) - lean summary
-fn generate_git_context(project_path: &Path) -> Option<String> {
-    // Check if it's a git repo
-    let git_dir = project_path.join(".git");
-    if !git_dir.exists() {
-        return None;
-    }
-
-    let mut git_info = Vec::new();
-
-    // Get current branch
-    if let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(project_path)
-        .output() 
-    {
-        if output.status.success() {
-            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !branch.is_empty() && branch != "HEAD" {
-                git_info.push(format!("Branch: {}", branch));
-            }
-        }
-    }
-
-    // Get short status (modified files count)
-    if let Ok(output) = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(project_path)
-        .output()
-    {
-        if output.status.success() {
-            let status_text = String::from_utf8_lossy(&output.stdout);
-            let status_count = status_text
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .count();
-            
-            if status_count == 0 {
-                git_info.push("Status: clean".to_string());
-            } else {
-                git_info.push(format!("Status: {} files modified", status_count));
-            }
-        }
-    }
-
-    // Get last commit (one-liner)
-    if let Ok(output) = Command::new("git")
-        .args(["log", "-1", "--pretty=format:%h %s"])
-        .current_dir(project_path)
-        .output()
-    {
-        if output.status.success() {
-            let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !commit.is_empty() {
-                git_info.push(format!("Last: {}", commit));
-            }
-        }
-    }
-
-    if git_info.is_empty() {
-        None
-    } else {
-        Some(git_info.join(" | "))
-    }
-}
+// Git context removed to keep system prompt stable for caching.
+// Agent can use exec tool to run git commands when needed.

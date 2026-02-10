@@ -289,16 +289,21 @@ impl ClaudeClient {
                 request_body["system"] = json!([
                     {
                         "type": "text",
-                        "text": "You are Claude Code, Anthropic's official CLI for Claude.",
-                        "cache_control": { "type": "ephemeral" }
+                        "text": "You are Claude Code, Anthropic's official CLI for Claude."
                     },
                     {
                         "type": "text",
-                        "text": system
+                        "text": system,
+                        "cache_control": { "type": "ephemeral" }
                     }
                 ]);
             } else {
-                request_body["system"] = json!(system);
+                // Use array format for cache_control support
+                request_body["system"] = json!([{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": { "type": "ephemeral" }
+                }]);
             }
         } else if self.config.auth_method() == &AuthMethod::OAuth {
             request_body["system"] = json!([{
@@ -309,7 +314,17 @@ impl ClaudeClient {
         }
 
         if let Some(tools_value) = tools {
-            request_body["tools"] = tools_value;
+            // Add cache_control to the last tool for prompt caching
+            if let Value::Array(mut tools_array) = tools_value {
+                if let Some(last_tool) = tools_array.last_mut() {
+                    if let Value::Object(ref mut obj) = last_tool {
+                        obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
+                    }
+                }
+                request_body["tools"] = Value::Array(tools_array);
+            } else {
+                request_body["tools"] = tools_value;
+            }
         }
 
         if stream {

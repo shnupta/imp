@@ -600,31 +600,25 @@ impl ClaudeClient {
     }
 
     /// Extract raw content blocks from response (preserves tool_use blocks)
+    /// NOTE: Thinking blocks are excluded — they should not be sent back to the API
+    /// in subsequent turns (breaks caching and isn't expected by the API).
     pub fn extract_content_blocks(&self, response: &AnthropicResponse) -> Vec<Value> {
         response
             .content
             .iter()
-            .map(|block| match block {
-                ContentBlock::Text { text } => json!({
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(json!({
                     "type": "text",
                     "text": text
-                }),
-                ContentBlock::ToolUse { id, name, input } => json!({
+                })),
+                ContentBlock::ToolUse { id, name, input } => Some(json!({
                     "type": "tool_use",
                     "id": id,
                     "name": name,
                     "input": input
-                }),
-                ContentBlock::Thinking { thinking, signature } => {
-                    let mut block = json!({
-                        "type": "thinking",
-                        "thinking": thinking
-                    });
-                    if let Some(sig) = signature {
-                        block["signature"] = json!(sig);
-                    }
-                    block
-                },
+                })),
+                // Skip thinking blocks — they shouldn't be sent back to the API
+                ContentBlock::Thinking { .. } => None,
             })
             .collect()
     }

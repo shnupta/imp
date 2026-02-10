@@ -191,12 +191,20 @@ impl ToolRegistry {
     pub async fn get_tool_schemas(&mut self) -> Value {
         let mut schemas = Vec::new();
 
+        // Sort tools by name for deterministic ordering (required for prompt caching)
+        let mut sorted_tools: Vec<_> = self.tools.values().collect();
+        sorted_tools.sort_by(|a, b| a.tool.name.cmp(&b.tool.name));
+
         // Add builtin and custom tools
-        for tool_def in self.tools.values() {
+        for tool_def in sorted_tools {
             let mut properties = serde_json::Map::new();
             let mut required = Vec::new();
 
-            for (param_name, param_def) in &tool_def.tool.parameters {
+            // Sort parameters by name for deterministic ordering
+            let mut sorted_params: Vec<_> = tool_def.tool.parameters.iter().collect();
+            sorted_params.sort_by(|a, b| a.0.cmp(b.0));
+
+            for (param_name, param_def) in sorted_params {
                 if param_def.required {
                     required.push(param_name.clone());
                 }
@@ -210,6 +218,9 @@ impl ToolRegistry {
 
                 properties.insert(param_name.clone(), Value::Object(param_schema));
             }
+
+            // Sort required array for deterministic ordering
+            required.sort();
 
             let schema = json!({
                 "name": tool_def.tool.name,
@@ -235,11 +246,19 @@ impl ToolRegistry {
     pub fn get_tool_schemas_sync(&self) -> Value {
         let mut schemas = Vec::new();
 
-        for tool_def in self.tools.values() {
+        // Sort tools by name for deterministic ordering (required for prompt caching)
+        let mut sorted_tools: Vec<_> = self.tools.values().collect();
+        sorted_tools.sort_by(|a, b| a.tool.name.cmp(&b.tool.name));
+
+        for tool_def in sorted_tools {
             let mut properties = serde_json::Map::new();
             let mut required = Vec::new();
 
-            for (param_name, param_def) in &tool_def.tool.parameters {
+            // Sort parameters by name for deterministic ordering
+            let mut sorted_params: Vec<_> = tool_def.tool.parameters.iter().collect();
+            sorted_params.sort_by(|a, b| a.0.cmp(b.0));
+
+            for (param_name, param_def) in sorted_params {
                 if param_def.required {
                     required.push(param_name.clone());
                 }
@@ -253,6 +272,9 @@ impl ToolRegistry {
 
                 properties.insert(param_name.clone(), Value::Object(param_schema));
             }
+
+            // Sort required array for deterministic ordering
+            required.sort();
 
             let schema = json!({
                 "name": tool_def.tool.name,
